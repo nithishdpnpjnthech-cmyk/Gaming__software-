@@ -4,33 +4,33 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet("Debug", "Release")]
-    [string]$Configuration = "Release"
+    [ValidateSet('Debug', 'Release')]
+    [string]$Configuration = 'Release'
 )
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = 'Stop'
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$BaseDir = Split-Path -Parent $ScriptDir
 
-$scriptDir = $PSScriptRoot
-$projectPath = Join-Path $scriptDir "..\src\GamingCafe.ClientAgent\GamingCafe.ClientAgent.csproj"
-$testPath = Join-Path $scriptDir "..\tests\GamingCafe.ClientAgent.Tests\GamingCafe.ClientAgent.Tests.csproj"
-$nugetConfig = Join-Path $scriptDir "..\nuget.config"
+Write-Host "=== Building Gaming Cafe Client Agent ($Configuration) ===" -ForegroundColor Cyan
 
-Write-Host "=========================================================" -ForegroundColor Cyan
-Write-Host "  Building Gaming Cafe Client Agent [$Configuration]      " -ForegroundColor Cyan
-Write-Host "=========================================================" -ForegroundColor Cyan
-
-# Restore if config file exists
-if (Test-Path $nugetConfig) {
-    dotnet restore "$projectPath" --configfile "$nugetConfig"
-    dotnet restore "$testPath" --configfile "$nugetConfig"
+# Set .NET 10 environment if using local SDK
+if (Test-Path "C:\Users\Roope\AppData\Local\Microsoft\dotnet\dotnet.exe") {
+    $env:DOTNET_ROOT = "C:\Users\Roope\AppData\Local\Microsoft\dotnet"
+    $env:PATH = "$env:DOTNET_ROOT;$env:PATH"
 }
+$env:DOTNET_CLI_HOME = "$BaseDir\.dotnet_home"
+$env:APPDATA = "$BaseDir\.dotnet_home\AppData\Roaming"
+$env:USERPROFILE = "$BaseDir\.dotnet_home"
 
-dotnet build "$projectPath" -c $Configuration --no-restore
-dotnet build "$testPath" -c $Configuration --no-restore
-
-if ($LASTEXITCODE -eq 0) {
-    Write-Host "`nBuild completed successfully." -ForegroundColor Green
-} else {
-    Write-Error "Build failed with exit code $LASTEXITCODE."
-    exit $LASTEXITCODE
+Push-Location $BaseDir
+try {
+    dotnet restore "src\GamingCafe.ClientAgent\GamingCafe.ClientAgent.csproj" --configfile "$BaseDir\nuget.config"
+    dotnet restore "tests\GamingCafe.ClientAgent.Tests\GamingCafe.ClientAgent.Tests.csproj" --configfile "$BaseDir\nuget.config"
+    dotnet build "src\GamingCafe.ClientAgent\GamingCafe.ClientAgent.csproj" --no-restore -c $Configuration
+    dotnet build "tests\GamingCafe.ClientAgent.Tests\GamingCafe.ClientAgent.Tests.csproj" --no-restore -c $Configuration
+    Write-Host "Build completed successfully." -ForegroundColor Green
+}
+finally {
+    Pop-Location
 }

@@ -2,39 +2,28 @@ using System.Text.RegularExpressions;
 
 namespace GamingCafe.ClientAgent.Security;
 
-/// <summary>
-/// Defensive sanitization helper to guarantee secrets, tokens, and authorization headers
-/// are strictly redacted prior to logging or diagnostic output.
-/// </summary>
-public static class SecurityMasker
+public static partial class SecurityMasker
 {
-    private const string Mask = "[REDACTED]";
+    [GeneratedRegex(@"(?i)(token|bearer|secret|password|key)\s*[:=]\s*([a-zA-Z0-9_\-\.]{6,})")]
+    private static partial Regex SecretPatternRegex();
 
-    public static string MaskSecret(string? secret)
+    public static string Mask(string? value)
     {
-        if (string.IsNullOrWhiteSpace(secret))
-        {
-            return "<empty>";
-        }
+        if (string.IsNullOrEmpty(value)) return string.Empty;
+        if (value.Length <= 8) return "***";
 
-        if (secret.Length <= 8)
-        {
-            return "******";
-        }
-
-        return $"{secret[..3]}...{secret[^3..]}";
+        return $"{value[..4]}...{value[^4..]}";
     }
 
-    public static string SanitizeLogMessage(string? input)
+    public static string SanitizeLogMessage(string message)
     {
-        if (string.IsNullOrEmpty(input)) return string.Empty;
+        if (string.IsNullOrEmpty(message)) return string.Empty;
 
-        // Redact HTTP Bearer tokens
-        var sanitized = Regex.Replace(input, @"(Bearer\s+)[A-Za-z0-9_\-\.]+", $"$1{Mask}", RegexOptions.IgnoreCase);
-
-        // Redact JSON fields containing sensitive credential strings
-        sanitized = Regex.Replace(sanitized, @"([""']?(?:deviceSecret|token|password|secret|authorization)[""']?\s*:\s*[""'])(?:[^""'\\]|\\.)*([""'])", $"$1{Mask}$2", RegexOptions.IgnoreCase);
-
-        return sanitized;
+        return SecretPatternRegex().Replace(message, match =>
+        {
+            var key = match.Groups[1].Value;
+            var val = match.Groups[2].Value;
+            return $"{key}:{Mask(val)}";
+        });
     }
 }

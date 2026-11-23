@@ -1,8 +1,0 @@
-<Solution>
-  <Folder Name="/src/">
-    <Project Path="src/GamingCafe.ClientAgent/GamingCafe.ClientAgent.csproj" />
-  </Folder>
-  <Folder Name="/tests/">
-    <Project Path="tests/GamingCafe.ClientAgent.Tests/GamingCafe.ClientAgent.Tests.csproj" />
-  </Folder>
-</Solution>

@@ -1,99 +1,98 @@
-using Microsoft.Extensions.Options;
-
 namespace GamingCafe.ClientAgent.Configuration;
 
-/// <summary>
-/// Startup validator enforcing zero-trust invariants on AgentConfiguration.
-/// Fails fast if insecure schemes, invalid ranges, or missing required settings are detected.
-/// </summary>
-public class ConfigurationValidator : IValidateOptions<AgentConfiguration>
+public static class ConfigurationValidator
 {
-    public ValidateOptionsResult Validate(string? name, AgentConfiguration options)
+    public static (bool IsValid, List<string> Errors) Validate(AgentConfiguration config)
     {
-        var failures = new List<string>();
+        var errors = new List<string>();
 
-        // 1. REST Base URL Validation
-        if (string.IsNullOrWhiteSpace(options.BackendApiBaseUrl))
+        if (config == null)
         {
-            failures.Add("BackendApiBaseUrl cannot be empty.");
-        }
-        else if (!Uri.TryCreate(options.BackendApiBaseUrl, UriKind.Absolute, out var apiUri))
-        {
-            failures.Add($"BackendApiBaseUrl '{options.BackendApiBaseUrl}' is not a valid absolute URI.");
-        }
-        else
-        {
-            var isLocalhost = apiUri.Host.Equals("localhost", StringComparison.OrdinalIgnoreCase) ||
-                              apiUri.Host.Equals("127.0.0.1", StringComparison.OrdinalIgnoreCase);
-
-            if (apiUri.Scheme != Uri.UriSchemeHttps && !(options.EnvironmentName.Equals("Development", StringComparison.OrdinalIgnoreCase) && isLocalhost))
-            {
-                failures.Add($"BackendApiBaseUrl must use HTTPS scheme in {options.EnvironmentName} environment. Provided: {apiUri.Scheme}");
-            }
+            errors.Add("Configuration cannot be null.");
+            return (false, errors);
         }
 
-        // 2. SignalR Hub URL Validation
-        if (string.IsNullOrWhiteSpace(options.SignalRHubUrl))
+        // Backend validation
+        if (string.IsNullOrWhiteSpace(config.Backend.HubUrl))
         {
-            failures.Add("SignalRHubUrl cannot be empty.");
+            errors.Add("Backend HubUrl cannot be empty.");
         }
-        else if (!Uri.TryCreate(options.SignalRHubUrl, UriKind.Absolute, out var hubUri))
+        else if (!Uri.TryCreate(config.Backend.HubUrl, UriKind.Absolute, out var uri))
         {
-            failures.Add($"SignalRHubUrl '{options.SignalRHubUrl}' is not a valid absolute URI.");
+            errors.Add($"Invalid HubUrl format: '{config.Backend.HubUrl}'.");
         }
         else
         {
-            var isLocalhost = hubUri.Host.Equals("localhost", StringComparison.OrdinalIgnoreCase) ||
-                              hubUri.Host.Equals("127.0.0.1", StringComparison.OrdinalIgnoreCase);
-
-            var isSecureScheme = hubUri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ||
-                                 hubUri.Scheme.Equals("wss", StringComparison.OrdinalIgnoreCase);
-
-            if (!isSecureScheme && !(options.EnvironmentName.Equals("Development", StringComparison.OrdinalIgnoreCase) && isLocalhost))
+            var scheme = uri.Scheme.ToLowerInvariant();
+            if (config.Backend.RequireWss || config.Security.RejectNonWss)
             {
-                failures.Add($"SignalRHubUrl must use WSS or HTTPS scheme in {options.EnvironmentName} environment. Insecure ws:// or http:// is disallowed.");
+                if (scheme != "wss" && scheme != "https")
+                {
+                    errors.Add($"Insecure HubUrl scheme '{scheme}'. Secure WebSocket requires 'wss://' or 'https://'.");
+                }
+
+                if (!config.Backend.ValidateCertificates && string.IsNullOrWhiteSpace(config.Backend.ExpectedCertificateThumbprint))
+                {
+                    errors.Add("Insecure configuration: TLS Certificate validation cannot be disabled when security hardening (RejectNonWss/RequireWss) is active.");
+                }
+            }
+            else
+            {
+                if (scheme != "wss" && scheme != "https" && scheme != "ws" && scheme != "http")
+                {
+                    errors.Add($"Unsupported HubUrl scheme '{scheme}'.");
+                }
             }
         }
 
-        // 3. Timeout and interval validations
-        if (options.HeartbeatIntervalSeconds < 5)
+        if (config.Backend.ConnectionTimeoutSeconds <= 0)
         {
-            failures.Add("HeartbeatIntervalSeconds must be at least 5 seconds.");
+            errors.Add("ConnectionTimeoutSeconds must be greater than 0.");
         }
 
-        if (options.HttpTimeoutSeconds < 2)
+        if (config.Backend.HandshakeTimeoutSeconds <= 0)
         {
-            failures.Add("HttpTimeoutSeconds must be at least 2 seconds.");
+            errors.Add("HandshakeTimeoutSeconds must be greater than 0.");
         }
 
-        if (options.SignalRConnectionTimeoutSeconds < 5)
+        // Heartbeat validation
+        if (config.Heartbeat.IntervalSeconds < 1 || config.Heartbeat.IntervalSeconds > 300)
         {
-            failures.Add("SignalRConnectionTimeoutSeconds must be at least 5 seconds.");
+            errors.Add("Heartbeat IntervalSeconds must be between 1 and 300 seconds.");
         }
 
-        if (options.MinRetryBackoffSeconds < 1)
+        if (config.Heartbeat.TimeoutSeconds < 1 || config.Heartbeat.TimeoutSeconds >= config.Heartbeat.IntervalSeconds * 3)
         {
-            failures.Add("MinRetryBackoffSeconds must be at least 1 second.");
+            errors.Add("Heartbeat TimeoutSeconds must be positive and reasonable relative to interval.");
         }
 
-        if (options.MaxRetryBackoffSeconds < options.MinRetryBackoffSeconds)
+        if (config.Heartbeat.MaxMissedHeartbeats < 1 || config.Heartbeat.MaxMissedHeartbeats > 10)
         {
-            failures.Add("MaxRetryBackoffSeconds must be greater than or equal to MinRetryBackoffSeconds.");
+            errors.Add("Heartbeat MaxMissedHeartbeats must be between 1 and 10.");
         }
 
-        if (options.BackoffJitterFactor < 0.0 || options.BackoffJitterFactor > 0.5)
+        // Reconnection validation
+        if (config.Reconnection.InitialDelaySeconds <= 0)
         {
-            failures.Add("BackoffJitterFactor must be between 0.0 and 0.5.");
+            errors.Add("InitialDelaySeconds must be greater than 0.");
         }
 
-        if (options.TlsValidationMode.Equals("PinnedThumbprint", StringComparison.OrdinalIgnoreCase) &&
-            string.IsNullOrWhiteSpace(options.PinnedCertificateThumbprint))
+        if (config.Reconnection.MaxDelaySeconds < config.Reconnection.InitialDelaySeconds)
         {
-            failures.Add("PinnedCertificateThumbprint is required when TlsValidationMode is 'PinnedThumbprint'.");
+            errors.Add("MaxDelaySeconds cannot be less than InitialDelaySeconds.");
         }
 
-        return failures.Count > 0
-            ? ValidateOptionsResult.Fail(failures)
-            : ValidateOptionsResult.Success;
+        if (config.Reconnection.BackoffMultiplier <= 1.0)
+        {
+            errors.Add("BackoffMultiplier must be greater than 1.0.");
+        }
+
+        // Identity
+        if (string.IsNullOrWhiteSpace(config.Identity.StorageDirectory))
+        {
+            errors.Add("Identity StorageDirectory cannot be empty.");
+        }
+
+        return (errors.Count == 0, errors);
     }
 }

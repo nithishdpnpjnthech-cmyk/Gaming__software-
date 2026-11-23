@@ -1,39 +1,37 @@
 <#
 .SYNOPSIS
-    Publishes a production deployment build of the Gaming Cafe Client Agent.
+    Publishes the Gaming Cafe Client Agent as a self-contained or framework-dependent Windows executable.
 #>
 [CmdletBinding()]
 param(
-    [string]$OutputDir = "$PSScriptRoot\..\publish",
-    [string]$RuntimeIdentifier = "win-x64",
-    [ValidateSet("Debug", "Release")]
-    [string]$Configuration = "Release"
+    [ValidateSet('Debug', 'Release')]
+    [string]$Configuration = 'Release',
+    [string]$OutputDir = "$PSScriptRoot\..\publish"
 )
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = 'Stop'
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$BaseDir = Split-Path -Parent $ScriptDir
 
-$scriptDir = $PSScriptRoot
-$projectPath = Join-Path $scriptDir "..\src\GamingCafe.ClientAgent\GamingCafe.ClientAgent.csproj"
-$nugetConfig = Join-Path $scriptDir "..\nuget.config"
-$resolvedOutput = [System.IO.Path]::GetFullPath($OutputDir)
+Write-Host "=== Publishing Gaming Cafe Client Agent ($Configuration) ===" -ForegroundColor Cyan
 
-Write-Host "=========================================================" -ForegroundColor Cyan
-Write-Host "  Publishing Windows Client Agent Deployment Build       " -ForegroundColor Cyan
-Write-Host "=========================================================" -ForegroundColor Cyan
-Write-Host "Target Project: $projectPath"
-Write-Host "Output Dir:     $resolvedOutput"
-Write-Host "Runtime:        $RuntimeIdentifier"
-Write-Host "Configuration:  $Configuration"
-
-if (Test-Path $nugetConfig) {
-    dotnet restore "$projectPath" -r $RuntimeIdentifier --configfile "$nugetConfig"
+if (Test-Path "C:\Users\Roope\AppData\Local\Microsoft\dotnet\dotnet.exe") {
+    $env:DOTNET_ROOT = "C:\Users\Roope\AppData\Local\Microsoft\dotnet"
+    $env:PATH = "$env:DOTNET_ROOT;$env:PATH"
 }
+$env:DOTNET_CLI_HOME = "$BaseDir\.dotnet_home"
+$env:APPDATA = "$BaseDir\.dotnet_home\AppData\Roaming"
+$env:USERPROFILE = "$BaseDir\.dotnet_home"
 
-dotnet publish "$projectPath" -c $Configuration -r $RuntimeIdentifier --self-contained false --no-restore -o "$resolvedOutput"
+$ProjectFile = "$BaseDir\src\GamingCafe.ClientAgent\GamingCafe.ClientAgent.csproj"
+$ResolvedOutDir = [System.IO.Path]::GetFullPath($OutputDir)
 
-if ($LASTEXITCODE -eq 0) {
-    Write-Host "`nPublish completed successfully to: $resolvedOutput" -ForegroundColor Green
-} else {
-    Write-Error "Publish failed with exit code $LASTEXITCODE."
-    exit $LASTEXITCODE
+Push-Location $BaseDir
+try {
+    dotnet restore "$ProjectFile" --configfile "$BaseDir\nuget.config" -r win-x64
+    dotnet publish "$ProjectFile" -c $Configuration -r win-x64 --no-restore -o "$ResolvedOutDir"
+    Write-Host "Published binaries available at: $ResolvedOutDir" -ForegroundColor Green
+}
+finally {
+    Pop-Location
 }

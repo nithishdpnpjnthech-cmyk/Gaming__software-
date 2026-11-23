@@ -1,150 +1,153 @@
 using System.Collections.Concurrent;
-using System.Runtime.InteropServices;
+using System.Text;
 using GamingCafe.ClientAgent.Security;
 using Microsoft.Extensions.Logging;
 
 namespace GamingCafe.ClientAgent.Logging;
 
-/// <summary>
-/// Lightweight, zero-dependency rolling file logger with daily rotation, size limits,
-/// and automated credential sanitization.
-/// </summary>
-public class FileLoggerProvider : ILoggerProvider
+public sealed class FileLoggerProvider : ILoggerProvider
 {
     private readonly string _logDirectory;
-    private readonly long _maxFileSizeBytes;
-    private readonly BlockingCollection<string> _logQueue = new(1000);
-    private readonly Thread _loggingThread;
+    private readonly int _maxFileSizeMb;
+    private readonly int _retainedDays;
+    private readonly BlockingCollection<string> _messageQueue = new(10000);
     private readonly CancellationTokenSource _cts = new();
+    private readonly Task _writerTask;
+    private bool _isDisposed;
 
-    public FileLoggerProvider(string? logDirectory = null, long maxFileSizeBytes = 10 * 1024 * 1024)
+    public FileLoggerProvider(FileLoggerOptions? options = null)
     {
-        _maxFileSizeBytes = maxFileSizeBytes;
+        var opts = options ?? new FileLoggerOptions();
+        _logDirectory = Path.GetFullPath(string.IsNullOrWhiteSpace(opts.LogDirectory) ? "logs" : opts.LogDirectory);
+        _maxFileSizeMb = opts.MaxFileSizeMb > 0 ? opts.MaxFileSizeMb : 10;
+        _retainedDays = opts.RetainedFileDays > 0 ? opts.RetainedFileDays : 14;
 
-        if (!string.IsNullOrWhiteSpace(logDirectory))
+        try
         {
-            _logDirectory = Path.GetFullPath(logDirectory);
+            Directory.CreateDirectory(_logDirectory);
         }
-        else if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        catch
         {
-            var programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
-            _logDirectory = Path.Combine(programData, "GamingCafe", "ClientAgent", "logs");
-        }
-        else
-        {
-            _logDirectory = Path.Combine(AppContext.BaseDirectory, "logs");
+            // Fail-safe if directory creation fails on locked storage
         }
 
-        Directory.CreateDirectory(_logDirectory);
-
-        _loggingThread = new Thread(ProcessLogQueue)
-        {
-            IsBackground = true,
-            Name = "AgentFileLogger"
-        };
-        _loggingThread.Start();
+        _writerTask = Task.Run(ProcessQueueAsync);
     }
 
-    public ILogger CreateLogger(string categoryName) => new FileLogger(categoryName, this);
-
-    public void EnqueueLog(string message)
-    {
-        if (!_cts.IsCancellationRequested)
+    public FileLoggerProvider(string logDirectory, int maxFileSizeMb = 10, int retainedDays = 14)
+        : this(new FileLoggerOptions
         {
-            _logQueue.TryAdd(message);
-        }
+            LogDirectory = logDirectory,
+            MaxFileSizeMb = maxFileSizeMb,
+            RetainedFileDays = retainedDays
+        })
+    {
     }
 
-    private void ProcessLogQueue()
+    public ILogger CreateLogger(string categoryName) =>
+        new FileLogger(categoryName, _messageQueue);
+
+    private async Task ProcessQueueAsync()
     {
-        while (!_cts.IsCancellationRequested)
+        while (!_messageQueue.IsCompleted)
         {
             try
             {
-                if (_logQueue.TryTake(out var message, 500, _cts.Token))
+                if (_messageQueue.TryTake(out var message, 1000, _cts.Token))
                 {
-                    WriteToFile(message);
+                    await WriteToFileAsync(message).ConfigureAwait(false);
                 }
             }
             catch (OperationCanceledException)
             {
+                // Drain remaining queued messages
+                while (_messageQueue.TryTake(out var remainingMessage))
+                {
+                    try
+                    {
+                        await WriteToFileAsync(remainingMessage).ConfigureAwait(false);
+                    }
+                    catch
+                    {
+                        // Suppress write errors during shutdown
+                    }
+                }
                 break;
             }
-            catch { }
-        }
-
-        while (_logQueue.TryTake(out var message))
-        {
-            try { WriteToFile(message); } catch { }
+            catch
+            {
+                // Silently swallow file logger disk write errors to prevent service crash
+            }
         }
     }
 
-    private void WriteToFile(string message)
+    private async Task WriteToFileAsync(string message)
     {
-        try
+        var dateStr = DateTimeOffset.UtcNow.ToString("yyyy-MM-dd");
+        var logFilePath = Path.Combine(_logDirectory, $"clientagent-{dateStr}.log");
+
+        if (File.Exists(logFilePath))
         {
-            var dateStr = DateTime.UtcNow.ToString("yyyy-MM-dd");
-            var filePath = Path.Combine(_logDirectory, $"agent-{dateStr}.log");
-
-            if (File.Exists(filePath) && new FileInfo(filePath).Length > _maxFileSizeBytes)
+            var info = new FileInfo(logFilePath);
+            if (info.Length > _maxFileSizeMb * 1024L * 1024L)
             {
-                var timestamp = DateTime.UtcNow.ToString("HHmmss");
-                var rotated = Path.Combine(_logDirectory, $"agent-{dateStr}-{timestamp}.log");
-                File.Move(filePath, rotated);
+                var timestamp = DateTimeOffset.UtcNow.ToString("HHmmss");
+                var rotatedPath = Path.Combine(_logDirectory, $"clientagent-{dateStr}-{timestamp}.log");
+                File.Move(logFilePath, rotatedPath, overwrite: true);
             }
-
-            File.AppendAllText(filePath, message + Environment.NewLine);
         }
-        catch { }
+
+        await File.AppendAllTextAsync(logFilePath, message + Environment.NewLine, Encoding.UTF8).ConfigureAwait(false);
     }
 
     public void Dispose()
     {
+        if (_isDisposed) return;
+        _isDisposed = true;
+
         _cts.Cancel();
-        _loggingThread.Join(1000);
-        _logQueue.Dispose();
+        _messageQueue.CompleteAdding();
+        try
+        {
+            _writerTask.Wait(TimeSpan.FromSeconds(3));
+        }
+        catch
+        {
+            // Suppress wait cancellation exceptions
+        }
         _cts.Dispose();
+        _messageQueue.Dispose();
     }
 }
 
-public class FileLogger : ILogger
+public sealed class FileLogger : ILogger
 {
-    private readonly string _categoryName;
-    private readonly FileLoggerProvider _provider;
+    private readonly string _category;
+    private readonly BlockingCollection<string> _queue;
 
-    public FileLogger(string categoryName, FileLoggerProvider provider)
+    public FileLogger(string category, BlockingCollection<string> queue)
     {
-        _categoryName = categoryName;
-        _provider = provider;
+        _category = category;
+        _queue = queue;
     }
 
     public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
 
     public bool IsEnabled(LogLevel logLevel) => logLevel != LogLevel.None;
 
-    public void Log<TState>(
-        LogLevel logLevel,
-        EventId eventId,
-        TState state,
-        Exception? exception,
-        Func<TState, Exception?, string> formatter)
+    public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
     {
         if (!IsEnabled(logLevel)) return;
 
-        var message = formatter(state, exception);
-        var sanitizedMessage = SecurityMasker.SanitizeLogMessage(message);
+        var rawMessage = formatter(state, exception);
+        var sanitizedMessage = SecurityMasker.SanitizeLogMessage(rawMessage);
 
-        var logLine = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}Z] [{logLevel.ToString().ToUpperInvariant()}] [{_categoryName}] {sanitizedMessage}";
-
+        var logEntry = $"{DateTimeOffset.UtcNow:yyyy-MM-dd HH:mm:ss.fff zzz} [{logLevel,-5}] [{_category}] {sanitizedMessage}";
         if (exception != null)
         {
-            logLine += Environment.NewLine + $"Exception: {exception.GetType().FullName}: {exception.Message}";
-            if (!string.IsNullOrWhiteSpace(exception.StackTrace))
-            {
-                logLine += Environment.NewLine + exception.StackTrace;
-            }
+            logEntry += Environment.NewLine + exception.ToString();
         }
 
-        _provider.EnqueueLog(logLine);
+        _queue.TryAdd(logEntry);
     }
 }

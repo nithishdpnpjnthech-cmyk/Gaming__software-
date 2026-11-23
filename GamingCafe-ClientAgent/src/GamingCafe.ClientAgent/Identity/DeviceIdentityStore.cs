@@ -1,121 +1,111 @@
-using System.Runtime.InteropServices;
 using System.Text.Json;
 using GamingCafe.ClientAgent.Configuration;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 
 namespace GamingCafe.ClientAgent.Identity;
 
-/// <summary>
-/// File-based identity store with atomic writes, ACL hardening, and corruption recovery.
-/// </summary>
-public class DeviceIdentityStore : IDeviceIdentityStore
+public sealed class DeviceIdentityStore : IDeviceIdentityStore
 {
-    public const string IdentityFileName = "device_identity.json";
-
-    private readonly string _storageDirectory;
+    private readonly string _filePath;
+    private readonly string _storageDir;
     private readonly ILogger<DeviceIdentityStore> _logger;
-    private readonly object _fileLock = new();
+    private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
-    public DeviceIdentityStore(IOptions<AgentConfiguration> options, ILogger<DeviceIdentityStore> logger)
+    public DeviceIdentityStore(IConfigurationService configService, ILogger<DeviceIdentityStore> logger)
     {
-        _logger = logger;
-
-        if (!string.IsNullOrWhiteSpace(options.Value.LocalDataDirectory))
-        {
-            _storageDirectory = Path.GetFullPath(options.Value.LocalDataDirectory);
-        }
-        else if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-        {
-            var programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
-            _storageDirectory = Path.Combine(programData, "GamingCafe", "ClientAgent");
-        }
-        else
-        {
-            _storageDirectory = Path.Combine(AppContext.BaseDirectory, "agent_data");
-        }
-
-        Directory.CreateDirectory(_storageDirectory);
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _storageDir = Path.GetFullPath(configService.CurrentConfiguration.Identity.StorageDirectory);
+        _filePath = Path.Combine(_storageDir, "device-identity.json");
     }
 
-    public string IdentityFilePath => Path.Combine(_storageDirectory, IdentityFileName);
+    public bool IdentityExists() => File.Exists(_filePath);
 
-    public bool Exists() => File.Exists(IdentityFilePath);
-
-    public async Task<DeviceIdentity?> LoadIdentityAsync(CancellationToken cancellationToken = default)
+    public DeviceIdentity? LoadIdentity()
     {
-        if (!Exists()) return null;
+        if (!File.Exists(_filePath))
+        {
+            return null;
+        }
 
         try
         {
-            var json = await File.ReadAllTextAsync(IdentityFilePath, cancellationToken);
-            if (string.IsNullOrWhiteSpace(json))
+            var json = File.ReadAllText(_filePath);
+            var identity = JsonSerializer.Deserialize<DeviceIdentity>(json, JsonOptions);
+            if (identity == null || identity.DeviceId == Guid.Empty)
             {
-                _logger.LogWarning("Identity file was empty.");
-                return null;
-            }
-
-            var identity = JsonSerializer.Deserialize<DeviceIdentity>(json, new JsonSerializerOptions
-            {
-                PropertyNameCaseInsensitive = true
-            });
-
-            if (identity == null || identity.DeviceId == Guid.Empty || string.IsNullOrWhiteSpace(identity.Hostname))
-            {
-                _logger.LogWarning("Identity file contained invalid data values.");
+                QuarantineCorruptedFile("Identity object was null or contained empty GUID.");
                 return null;
             }
 
             return identity;
         }
-        catch (Exception ex)
+        catch (JsonException ex)
         {
-            _logger.LogWarning(ex, "Failed to read or parse device identity JSON.");
+            _logger.LogError(ex, "Device identity file at '{FilePath}' is malformed JSON.", _filePath);
+            QuarantineCorruptedFile(ex.Message);
             return null;
         }
-    }
-
-    public async Task SaveIdentityAsync(DeviceIdentity identity, CancellationToken cancellationToken = default)
-    {
-        var json = JsonSerializer.Serialize(identity, new JsonSerializerOptions { WriteIndented = true });
-        var tempPath = IdentityFilePath + $".{Guid.NewGuid():N}.tmp";
-
-        await File.WriteAllTextAsync(tempPath, json, cancellationToken);
-
-        lock (_fileLock)
+        catch (Exception ex)
         {
-            if (File.Exists(IdentityFilePath))
-            {
-                File.Replace(tempPath, IdentityFilePath, null);
-            }
-            else
-            {
-                File.Move(tempPath, IdentityFilePath);
-            }
+            _logger.LogError(ex, "Unexpected error reading device identity from '{FilePath}'.", _filePath);
+            throw;
         }
     }
 
-    public void RecoverCorruptStorage()
+    public void SaveIdentity(DeviceIdentity identity)
     {
-        if (!Exists()) return;
+        ArgumentNullException.ThrowIfNull(identity);
+
+        if (identity.DeviceId == Guid.Empty)
+        {
+            throw new ArgumentException("DeviceId cannot be empty Guid.", nameof(identity));
+        }
+
+        Directory.CreateDirectory(_storageDir);
+
+        var tempFilePath = _filePath + $".tmp.{Guid.NewGuid():N}";
+        var json = JsonSerializer.Serialize(identity, JsonOptions);
 
         try
         {
-            var timestamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss");
-            var backupPath = Path.Combine(_storageDirectory, $"device_identity_corrupt_{timestamp}.bak");
-
-            lock (_fileLock)
+            File.WriteAllText(tempFilePath, json);
+            File.Move(tempFilePath, _filePath, overwrite: true);
+            _logger.LogInformation("Saved device identity for DeviceId '{DeviceId}'.", identity.DeviceId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to persist device identity to '{FilePath}'.", _filePath);
+            if (File.Exists(tempFilePath))
             {
-                if (File.Exists(IdentityFilePath))
-                {
-                    File.Move(IdentityFilePath, backupPath, overwrite: true);
-                    _logger.LogWarning("Corrupt identity file safely quarantined to: {BackupPath}", backupPath);
-                }
+                try { File.Delete(tempFilePath); } catch { /* ignore */ }
+            }
+            throw;
+        }
+    }
+
+    public void DeleteIdentity()
+    {
+        if (File.Exists(_filePath))
+        {
+            File.Delete(_filePath);
+            _logger.LogWarning("Device identity file deleted at '{FilePath}'.", _filePath);
+        }
+    }
+
+    private void QuarantineCorruptedFile(string reason)
+    {
+        try
+        {
+            var quarantinePath = _filePath + $".corrupted.{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}";
+            if (File.Exists(_filePath))
+            {
+                File.Move(_filePath, quarantinePath, overwrite: true);
+                _logger.LogCritical("Corrupted identity quarantined to '{QuarantinePath}'. Reason: {Reason}", quarantinePath, reason);
             }
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to quarantine corrupt identity file.");
+            _logger.LogError(ex, "Failed to quarantine corrupted identity file '{FilePath}'.", _filePath);
         }
     }
 }

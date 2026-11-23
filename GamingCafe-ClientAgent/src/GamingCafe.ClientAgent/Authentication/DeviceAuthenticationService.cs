@@ -1,57 +1,83 @@
+using GamingCafe.ClientAgent.Security;
 using Microsoft.Extensions.Logging;
 
 namespace GamingCafe.ClientAgent.Authentication;
 
-/// <summary>
-/// Service contract for device authentication and credential management.
-/// </summary>
-public interface IDeviceAuthenticationService
+public sealed class DeviceAuthenticationService : IDeviceAuthenticationService
 {
-    Task<bool> IsAuthenticatedAsync(CancellationToken cancellationToken = default);
-    Task<string?> GetDeviceSecretAsync(CancellationToken cancellationToken = default);
-    Task StoreIssuedSecretAsync(string deviceSecret, CancellationToken cancellationToken = default);
-    Task RevokeCredentialsAsync(CancellationToken cancellationToken = default);
-}
-
-/// <summary>
-/// Manages device authentication state, token acquisition, and revocation purging.
-/// </summary>
-public class DeviceAuthenticationService : IDeviceAuthenticationService
-{
-    public const string DeviceSecretKey = "agent_auth_secret";
-
-    private readonly IDeviceCredentialStore _credentialStore;
+    private readonly ISecureCredentialStore _credentialStore;
     private readonly ILogger<DeviceAuthenticationService> _logger;
+    private DeviceCredentials? _currentCredentials;
+    private readonly object _lock = new();
 
     public DeviceAuthenticationService(
-        IDeviceCredentialStore credentialStore,
+        ISecureCredentialStore credentialStore,
         ILogger<DeviceAuthenticationService> logger)
     {
-        _credentialStore = credentialStore;
-        _logger = logger;
+        _credentialStore = credentialStore ?? throw new ArgumentNullException(nameof(credentialStore));
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _currentCredentials = _credentialStore.LoadCredentials();
     }
 
-    public async Task<bool> IsAuthenticatedAsync(CancellationToken cancellationToken = default)
+    public bool IsAuthenticated
     {
-        var secret = await GetDeviceSecretAsync(cancellationToken);
-        return !string.IsNullOrWhiteSpace(secret);
+        get
+        {
+            lock (_lock)
+            {
+                return _currentCredentials != null && _currentCredentials.HasValidToken;
+            }
+        }
     }
 
-    public async Task<string?> GetDeviceSecretAsync(CancellationToken cancellationToken = default)
+    public DeviceCredentials? CurrentCredentials
     {
-        return await _credentialStore.GetCredentialAsync(DeviceSecretKey, cancellationToken);
+        get
+        {
+            lock (_lock)
+            {
+                return _currentCredentials;
+            }
+        }
     }
 
-    public async Task StoreIssuedSecretAsync(string deviceSecret, CancellationToken cancellationToken = default)
+    public Task<string?> GetAccessTokenAsync(CancellationToken cancellationToken = default)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(deviceSecret);
-        await _credentialStore.SaveCredentialAsync(DeviceSecretKey, deviceSecret, cancellationToken);
-        _logger.LogInformation("New device authentication credentials successfully stored.");
+        lock (_lock)
+        {
+            if (_currentCredentials == null)
+            {
+                return Task.FromResult<string?>(null);
+            }
+
+            if (_currentCredentials.IsExpired(TimeSpan.FromSeconds(30)))
+            {
+                _logger.LogWarning("Current access token is expired or expiring soon.");
+                return Task.FromResult<string?>(null);
+            }
+
+            return Task.FromResult<string?>(_currentCredentials.AccessToken);
+        }
     }
 
-    public async Task RevokeCredentialsAsync(CancellationToken cancellationToken = default)
+    public void SetCredentials(DeviceCredentials credentials)
     {
-        _logger.LogWarning("Revoking device credentials. Clearing local encrypted token.");
-        await _credentialStore.DeleteCredentialAsync(DeviceSecretKey, cancellationToken);
+        ArgumentNullException.ThrowIfNull(credentials);
+        lock (_lock)
+        {
+            _credentialStore.SaveCredentials(credentials);
+            _currentCredentials = credentials;
+            _logger.LogInformation("Device credentials updated. Token valid until: {ExpiresUtc}", credentials.TokenExpiresAtUtc);
+        }
+    }
+
+    public void InvalidateCredentials()
+    {
+        lock (_lock)
+        {
+            _logger.LogWarning("Invalidating device credentials.");
+            _credentialStore.ClearCredentials();
+            _currentCredentials = null;
+        }
     }
 }

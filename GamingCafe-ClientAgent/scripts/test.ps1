@@ -1,24 +1,28 @@
 <#
 .SYNOPSIS
-    Executes the full unit test suite for the Gaming Cafe Client Agent.
+    Runs the unit test suite for Gaming Cafe Client Agent.
 #>
 [CmdletBinding()]
 param()
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = 'Stop'
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$BaseDir = Split-Path -Parent $ScriptDir
 
-$scriptDir = $PSScriptRoot
-$testProject = Join-Path $scriptDir "..\tests\GamingCafe.ClientAgent.Tests\GamingCafe.ClientAgent.Tests.csproj"
+Write-Host "=== Running Gaming Cafe Client Agent Tests ===" -ForegroundColor Cyan
 
-Write-Host "=========================================================" -ForegroundColor Cyan
-Write-Host "  Running Gaming Cafe Client Agent Test Suite            " -ForegroundColor Cyan
-Write-Host "=========================================================" -ForegroundColor Cyan
+if (Test-Path "C:\Users\Roope\AppData\Local\Microsoft\dotnet\dotnet.exe") {
+    $env:DOTNET_ROOT = "C:\Users\Roope\AppData\Local\Microsoft\dotnet"
+    $env:PATH = "$env:DOTNET_ROOT;$env:PATH"
+}
+$env:DOTNET_CLI_HOME = "$BaseDir\.dotnet_home"
+$env:APPDATA = "$BaseDir\.dotnet_home\AppData\Roaming"
+$env:USERPROFILE = "$BaseDir\.dotnet_home"
 
-dotnet run --project "$testProject"
-
-if ($LASTEXITCODE -eq 0) {
-    Write-Host "`nAll tests passed successfully." -ForegroundColor Green
-} else {
-    Write-Error "Tests failed with exit code $LASTEXITCODE."
-    exit $LASTEXITCODE
+Push-Location $BaseDir
+try {
+    dotnet run --project "$BaseDir\tests\GamingCafe.ClientAgent.Tests"
+}
+finally {
+    Pop-Location
 }

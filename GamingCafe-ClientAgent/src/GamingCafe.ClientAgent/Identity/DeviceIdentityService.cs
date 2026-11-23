@@ -1,99 +1,149 @@
+using System.Net.NetworkInformation;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Text;
+using GamingCafe.ClientAgent.Configuration;
 using Microsoft.Extensions.Logging;
 
 namespace GamingCafe.ClientAgent.Identity;
 
-/// <summary>
-/// Manages device identity lifecycle, cryptographic UUIDv4 generation, and restart reuse.
-/// </summary>
-public class DeviceIdentityService : IDeviceIdentityService
+public sealed class DeviceIdentityService : IDeviceIdentityService
 {
     private readonly IDeviceIdentityStore _store;
+    private readonly IConfigurationService _configService;
     private readonly ILogger<DeviceIdentityService> _logger;
     private DeviceIdentity? _cachedIdentity;
-    private readonly SemaphoreSlim _lock = new(1, 1);
+    private readonly object _lock = new();
 
-    public DeviceIdentityService(IDeviceIdentityStore store, ILogger<DeviceIdentityService> logger)
+    public DeviceIdentityService(
+        IDeviceIdentityStore store,
+        IConfigurationService configService,
+        ILogger<DeviceIdentityService> logger)
     {
-        _store = store;
-        _logger = logger;
+        _store = store ?? throw new ArgumentNullException(nameof(store));
+        _configService = configService ?? throw new ArgumentNullException(nameof(configService));
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
-    public bool HasIdentity() => _cachedIdentity != null || _store.Exists();
-
-    public async Task<DeviceIdentity> GetOrCreateIdentityAsync(CancellationToken cancellationToken = default)
+    public DeviceIdentity CurrentIdentity
     {
-        if (_cachedIdentity != null)
+        get
         {
+            if (_cachedIdentity == null)
+            {
+                lock (_lock)
+                {
+                    _cachedIdentity ??= GetOrCreateIdentity();
+                }
+            }
             return _cachedIdentity;
         }
+    }
 
-        await _lock.WaitAsync(cancellationToken);
-        try
+    public DeviceIdentity GetOrCreateIdentity()
+    {
+        lock (_lock)
         {
-            if (_cachedIdentity != null)
+            var existing = _store.LoadIdentity();
+            if (existing != null)
             {
-                return _cachedIdentity;
-            }
+                _logger.LogInformation("Loaded existing device identity: {DeviceId} ({DeviceName})", existing.DeviceId, existing.DeviceName);
+                
+                // Refresh hardware/environmental properties if changed
+                var currentMac = GetPrimaryMacAddress();
+                var currentName = Environment.MachineName;
+                var currentOs = RuntimeInformation.OSDescription;
+                var clientVer = _configService.CurrentConfiguration.Identity.ClientVersion;
 
-            if (_store.Exists())
-            {
-                var existing = await _store.LoadIdentityAsync(cancellationToken);
-                if (existing != null)
+                if (existing.DeviceName != currentName ||
+                    existing.MacAddress != currentMac ||
+                    existing.OsVersion != currentOs ||
+                    existing.ClientVersion != clientVer)
                 {
-                    _cachedIdentity = existing;
-                    _logger.LogInformation("Loaded persistent Device ID: {DeviceId} for Host: {Hostname}",
-                        existing.DeviceId, existing.Hostname);
-                    return existing;
+                    existing.DeviceName = currentName;
+                    existing.MacAddress = currentMac;
+                    existing.OsVersion = currentOs;
+                    existing.ClientVersion = clientVer;
+                    existing.LastUpdatedAtUtc = DateTimeOffset.UtcNow;
+                    _store.SaveIdentity(existing);
+                    _logger.LogInformation("Updated device environmental attributes for {DeviceId}", existing.DeviceId);
                 }
 
-                _logger.LogWarning("Existing identity was invalid or corrupted. Recovering storage and generating new identity.");
-                _store.RecoverCorruptStorage();
+                _cachedIdentity = existing;
+                return existing;
             }
 
-            var newlyGenerated = GenerateCryptographicIdentity();
-            await _store.SaveIdentityAsync(newlyGenerated, cancellationToken);
-            _cachedIdentity = newlyGenerated;
+            // Create new persistent identity
+            var newId = Guid.NewGuid();
+            var now = DateTimeOffset.UtcNow;
+            var identity = new DeviceIdentity
+            {
+                DeviceId = newId,
+                DeviceName = Environment.MachineName,
+                HardwareIdentifier = GenerateHardwareFingerprint(),
+                MacAddress = GetPrimaryMacAddress(),
+                OsVersion = RuntimeInformation.OSDescription,
+                ClientVersion = _configService.CurrentConfiguration.Identity.ClientVersion,
+                FirstEnrolledAtUtc = now,
+                LastUpdatedAtUtc = now
+            };
 
-            _logger.LogInformation("Generated and persisted new Device ID: {DeviceId} for Host: {Hostname}",
-                newlyGenerated.DeviceId, newlyGenerated.Hostname);
-
-            return newlyGenerated;
-        }
-        finally
-        {
-            _lock.Release();
+            _store.SaveIdentity(identity);
+            _logger.LogInformation("Generated new device identity: {DeviceId} ({DeviceName})", identity.DeviceId, identity.DeviceName);
+            _cachedIdentity = identity;
+            return identity;
         }
     }
 
-    private static DeviceIdentity GenerateCryptographicIdentity()
+    public void RefreshIdentity()
     {
-        // Cryptographically strong UUIDv4 generation
-        byte[] bytes = new byte[16];
-        RandomNumberGenerator.Fill(bytes);
-
-        // Set version 4 (bits 12-15 = 0100)
-        bytes[7] = (byte)((bytes[7] & 0x0f) | 0x40);
-        // Set variant RFC 4122 (bits 6-7 = 10)
-        bytes[8] = (byte)((bytes[8] & 0x3f) | 0x80);
-
-        var deviceId = new Guid(bytes);
-        var hostname = Environment.MachineName;
-        var os = RuntimeInformation.OSDescription;
-
-        // Calculate non-authoritative hardware digest for clone detection
-        var rawData = $"{hostname}_{Environment.ProcessorCount}_{Environment.OSVersion}";
-        var hash = SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(rawData));
-        var digest = Convert.ToHexString(hash);
-
-        return new DeviceIdentity
+        lock (_lock)
         {
-            DeviceId = deviceId,
-            Hostname = hostname,
-            OperatingSystem = os,
-            CreatedAtUtc = DateTime.UtcNow,
-            HardwareDigest = digest
-        };
+            _cachedIdentity = null;
+            _ = CurrentIdentity;
+        }
+    }
+
+    private static string GetPrimaryMacAddress()
+    {
+        try
+        {
+            var nic = NetworkInterface.GetAllNetworkInterfaces()
+                .Where(n => n.OperationalStatus == OperationalStatus.Up &&
+                            n.NetworkInterfaceType != NetworkInterfaceType.Loopback &&
+                            n.NetworkInterfaceType != NetworkInterfaceType.Tunnel)
+                .OrderByDescending(n => n.Speed)
+                .FirstOrDefault();
+
+            if (nic != null)
+            {
+                var address = nic.GetPhysicalAddress().ToString();
+                if (!string.IsNullOrEmpty(address))
+                {
+                    return string.Join(":", Enumerable.Range(0, address.Length / 2)
+                        .Select(i => address.Substring(i * 2, 2)));
+                }
+            }
+        }
+        catch
+        {
+            // Fallback
+        }
+
+        return "00:00:00:00:00:00";
+    }
+
+    private static string GenerateHardwareFingerprint()
+    {
+        try
+        {
+            var raw = $"{Environment.MachineName}|{Environment.ProcessorCount}|{RuntimeInformation.OSArchitecture}|{RuntimeInformation.OSDescription}";
+            var hash = SHA256.HashData(Encoding.UTF8.GetBytes(raw));
+            return Convert.ToHexString(hash).ToLowerInvariant();
+        }
+        catch
+        {
+            return Guid.NewGuid().ToString("N");
+        }
     }
 }

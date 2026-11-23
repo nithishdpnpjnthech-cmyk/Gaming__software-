@@ -1,73 +1,70 @@
-using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using System.Security.Cryptography;
 using System.Text;
+using GamingCafe.ClientAgent.Configuration;
 using Microsoft.Extensions.Logging;
 
 namespace GamingCafe.ClientAgent.Security;
 
-/// <summary>
-/// Credential protection contract for encrypting sensitive tokens at rest.
-/// </summary>
-public interface ICredentialProtection
+[SupportedOSPlatform("windows")]
+public sealed class DpapiCredentialProtection : ICredentialProtector
 {
-    byte[] Protect(byte[] plainData);
-    byte[] Unprotect(byte[] cipherData);
-}
-
-/// <summary>
-/// Hardware/OS-backed credential protection using Windows Data Protection API (DPAPI).
-/// Utilizes application-level entropy to prevent ciphertext reuse across different services.
-/// </summary>
-[System.Runtime.Versioning.SupportedOSPlatform("windows")]
-public class DpapiCredentialProtection : ICredentialProtection
-{
+    private static readonly byte[] EntropySalt = Encoding.UTF8.GetBytes("GamingCafe-Agent-Entropy-V1-Salt-Key");
     private readonly DataProtectionScope _scope;
-    private readonly byte[] _entropy;
     private readonly ILogger<DpapiCredentialProtection> _logger;
 
-    public DpapiCredentialProtection(
-        ILogger<DpapiCredentialProtection> logger,
-        DataProtectionScope scope = DataProtectionScope.CurrentUser)
+    public DpapiCredentialProtection(IConfigurationService configService, ILogger<DpapiCredentialProtection> logger)
     {
-        _logger = logger;
-        _scope = scope;
-        _entropy = Encoding.UTF8.GetBytes("GamingCafe-Agent-v1-ContextEntropy");
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        var useMachineScope = configService.CurrentConfiguration.Security.UseMachineScope;
+        _scope = useMachineScope ? DataProtectionScope.LocalMachine : DataProtectionScope.CurrentUser;
     }
 
-    public byte[] Protect(byte[] plainData)
+    public byte[] Protect(byte[] unencryptedData)
     {
-        ArgumentNullException.ThrowIfNull(plainData);
+        ArgumentNullException.ThrowIfNull(unencryptedData);
+        if (unencryptedData.Length == 0) return Array.Empty<byte>();
+
         try
         {
-            return ProtectedData.Protect(plainData, _entropy, _scope);
+            return ProtectedData.Protect(unencryptedData, EntropySalt, _scope);
         }
-        catch (CryptographicException ex)
+        catch (Exception ex)
         {
             _logger.LogError(ex, "DPAPI encryption failed.");
-            throw new InvalidOperationException("Failed to encrypt sensitive data via Windows DPAPI.", ex);
+            throw new CryptographicException("Failed to protect data via DPAPI.", ex);
         }
     }
 
-    public byte[] Unprotect(byte[] cipherData)
+    public byte[] Unprotect(byte[] encryptedData)
     {
-        ArgumentNullException.ThrowIfNull(cipherData);
+        ArgumentNullException.ThrowIfNull(encryptedData);
+        if (encryptedData.Length == 0) return Array.Empty<byte>();
+
         try
         {
-            return ProtectedData.Unprotect(cipherData, _entropy, _scope);
+            return ProtectedData.Unprotect(encryptedData, EntropySalt, _scope);
         }
-        catch (CryptographicException ex)
+        catch (Exception ex)
         {
-            _logger.LogError(ex, "DPAPI decryption failed. Key scope mismatch or data corruption.");
-            throw new InvalidOperationException("Failed to decrypt sensitive data via Windows DPAPI.", ex);
+            _logger.LogError(ex, "DPAPI decryption failed.");
+            throw new CryptographicException("Failed to unprotect data via DPAPI.", ex);
         }
     }
-}
 
-/// <summary>
-/// Fallback/in-memory protection for non-Windows platforms and unit tests.
-/// </summary>
-public class PlainTextTestCredentialProtection : ICredentialProtection
-{
-    public byte[] Protect(byte[] plainData) => (byte[])plainData.Clone();
-    public byte[] Unprotect(byte[] cipherData) => (byte[])cipherData.Clone();
+    public string ProtectString(string unencrypted)
+    {
+        if (string.IsNullOrEmpty(unencrypted)) return string.Empty;
+        var bytes = Encoding.UTF8.GetBytes(unencrypted);
+        var protectedBytes = Protect(bytes);
+        return Convert.ToBase64String(protectedBytes);
+    }
+
+    public string UnprotectString(string encrypted)
+    {
+        if (string.IsNullOrEmpty(encrypted)) return string.Empty;
+        var bytes = Convert.FromBase64String(encrypted);
+        var unprotectedBytes = Unprotect(bytes);
+        return Encoding.UTF8.GetString(unprotectedBytes);
+    }
 }

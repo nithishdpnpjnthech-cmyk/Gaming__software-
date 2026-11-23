@@ -4,22 +4,11 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$ServiceName = "GamingCafe Client Agent"
+    [string]$ServiceName = "GamingCafeClientAgent"
 )
 
-$ErrorActionPreference = "Stop"
-
-$service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-if (-not $service) {
-    Write-Warning "Service '$ServiceName' is not installed."
-    exit 0
-}
-
-if ($service.Status -eq 'Stopped') {
-    Write-Host "Service '$ServiceName' is already stopped." -ForegroundColor Yellow
-} else {
-    Write-Host "Stopping service '$ServiceName' gracefully..." -ForegroundColor Yellow
-    Stop-Service -Name $ServiceName -Force
-    Start-Sleep -Seconds 1
-    Get-Service -Name $ServiceName | Select-Object Name, Status, StartType | Format-Table -AutoSize
-}
+$ErrorActionPreference = 'Stop'
+Write-Host "Stopping service '$ServiceName'..." -ForegroundColor Cyan
+Stop-Service -Name $ServiceName -Force
+$svc = Get-Service -Name $ServiceName
+Write-Host "Service status: $($svc.Status)" -ForegroundColor Yellow

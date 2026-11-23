@@ -1,106 +1,69 @@
 using System.Diagnostics;
-using GamingCafe.ClientAgent.Configuration;
-using GamingCafe.ClientAgent.Enrollment;
-using GamingCafe.ClientAgent.Realtime;
-using Microsoft.Extensions.Options;
 
 namespace GamingCafe.ClientAgent.Health;
 
-/// <summary>
-/// Maintains in-memory operational telemetry without exposing any public diagnostic ports.
-/// </summary>
-public class AgentHealthService : IAgentHealthService
+public sealed class AgentHealthService : IAgentHealthService
 {
-    private readonly AgentConfiguration _options;
-    private readonly DateTime _startTimeUtc;
-    private Guid? _deviceId;
-    private EnrollmentState _enrollmentState = EnrollmentState.Unregistered;
-    private RealtimeConnectionState _signalRState = RealtimeConnectionState.Disconnected;
-    private DateTime? _lastApiSuccessUtc;
-    private DateTime? _lastHeartbeatSuccessUtc;
-    private int _consecutiveErrors;
-    private string? _lastErrorMessage;
-    private readonly object _stateLock = new();
+    private readonly Process _currentProcess = Process.GetCurrentProcess();
+    private readonly DateTimeOffset _startedAt = DateTimeOffset.UtcNow;
+    private long _heartbeatsSent;
+    private long _heartbeatsAcked;
+    private double _lastLatencyMs;
+    private TimeSpan _lastTotalProcessorTime;
+    private DateTimeOffset _lastCpuCheckTime = DateTimeOffset.UtcNow;
+    private readonly object _lock = new();
 
-    public AgentHealthService(IOptions<AgentConfiguration> options)
+    public AgentHealthService()
     {
-        _options = options.Value;
-        _startTimeUtc = DateTime.UtcNow;
+        _lastTotalProcessorTime = _currentProcess.TotalProcessorTime;
     }
 
-    public void RecordServiceStarted() { }
-
-    public void RecordDeviceId(Guid deviceId)
+    public AgentHealthSnapshot GetSnapshot()
     {
-        lock (_stateLock) _deviceId = deviceId;
-    }
+        _currentProcess.Refresh();
 
-    public void RecordEnrollmentState(EnrollmentState state)
-    {
-        lock (_stateLock) _enrollmentState = state;
-    }
+        var now = DateTimeOffset.UtcNow;
+        double cpuPercent = 0.0;
 
-    public void RecordSignalRState(RealtimeConnectionState state)
-    {
-        lock (_stateLock) _signalRState = state;
-    }
-
-    public void RecordApiSuccess()
-    {
-        lock (_stateLock)
+        lock (_lock)
         {
-            _lastApiSuccessUtc = DateTime.UtcNow;
-            _consecutiveErrors = 0;
-            _lastErrorMessage = null;
-        }
-    }
+            var cpuTimeDelta = (_currentProcess.TotalProcessorTime - _lastTotalProcessorTime).TotalMilliseconds;
+            var totalTimeDelta = (now - _lastCpuCheckTime).TotalMilliseconds * Environment.ProcessorCount;
 
-    public void RecordApiFailure(string errorMessage)
-    {
-        lock (_stateLock)
-        {
-            _consecutiveErrors++;
-            _lastErrorMessage = errorMessage;
-        }
-    }
-
-    public void RecordHeartbeatSuccess()
-    {
-        lock (_stateLock)
-        {
-            _lastHeartbeatSuccessUtc = DateTime.UtcNow;
-            _lastApiSuccessUtc = DateTime.UtcNow;
-            _consecutiveErrors = 0;
-            _lastErrorMessage = null;
-        }
-    }
-
-    public AgentHealthReport GetCurrentHealth()
-    {
-        lock (_stateLock)
-        {
-            long memoryBytes = 0;
-            try
+            if (totalTimeDelta > 100)
             {
-                using var proc = Process.GetCurrentProcess();
-                memoryBytes = proc.WorkingSet64;
+                cpuPercent = Math.Clamp((cpuTimeDelta / totalTimeDelta) * 100.0, 0.0, 100.0);
+                _lastTotalProcessorTime = _currentProcess.TotalProcessorTime;
+                _lastCpuCheckTime = now;
             }
-            catch { }
+        }
 
-            return new AgentHealthReport
-            {
-                AgentRunningState = "Running",
-                ServiceUptimeSeconds = Math.Round((DateTime.UtcNow - _startTimeUtc).TotalSeconds, 2),
-                DeviceId = _deviceId,
-                EnrollmentState = _enrollmentState,
-                SignalRConnectionState = _signalRState,
-                LastSuccessfulApiRequestUtc = _lastApiSuccessUtc,
-                LastSuccessfulHeartbeatUtc = _lastHeartbeatSuccessUtc,
-                AgentVersion = _options.AgentVersion,
-                ConsecutiveErrors = _consecutiveErrors,
-                LastErrorMessage = _lastErrorMessage,
-                ProcessMemoryBytes = memoryBytes
-            };
+        var memoryMb = _currentProcess.WorkingSet64 / (1024.0 * 1024.0);
+
+        return new AgentHealthSnapshot
+        {
+            CpuPercent = Math.Round(cpuPercent, 1),
+            MemoryUsageMb = Math.Round(memoryMb, 1),
+            ThreadCount = _currentProcess.Threads.Count,
+            UptimeSeconds = Math.Round((now - _startedAt).TotalSeconds, 1),
+            HeartbeatsSent = Interlocked.Read(ref _heartbeatsSent),
+            HeartbeatsAcked = Interlocked.Read(ref _heartbeatsAcked),
+            LastLatencyMs = _lastLatencyMs,
+            TimestampUtc = now
+        };
+    }
+
+    public void RecordHeartbeatSent()
+    {
+        Interlocked.Increment(ref _heartbeatsSent);
+    }
+
+    public void RecordHeartbeatAcked(double latencyMs)
+    {
+        Interlocked.Increment(ref _heartbeatsAcked);
+        lock (_lock)
+        {
+            _lastLatencyMs = latencyMs;
         }
     }
 }

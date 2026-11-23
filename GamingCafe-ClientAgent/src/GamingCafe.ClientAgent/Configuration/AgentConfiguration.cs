@@ -1,98 +1,61 @@
-using System.ComponentModel.DataAnnotations;
-
 namespace GamingCafe.ClientAgent.Configuration;
 
-/// <summary>
-/// Strongly-typed configuration options for the Gaming Cafe Client Agent.
-/// Contains non-secret settings for REST API, SignalR WSS hub, retry backoff, and heartbeat intervals.
-/// Never store credentials, tokens, or private keys in this configuration.
-/// </summary>
-public class AgentConfiguration
+public sealed class AgentConfiguration
 {
-    public const string SectionName = "GamingCafeAgent";
+    public BackendConfig Backend { get; set; } = new();
+    public ReconnectionConfig Reconnection { get; set; } = new();
+    public HeartbeatConfig Heartbeat { get; set; } = new();
+    public IdentityConfig Identity { get; set; } = new();
+    public SecurityConfig Security { get; set; } = new();
+    public LoggingConfig Logging { get; set; } = new();
+}
 
-    /// <summary>
-    /// Base URL for the Admin backend REST API (e.g. https://admin.cafe.lan:5001).
-    /// </summary>
-    [Required]
-    public string BackendApiBaseUrl { get; set; } = "https://127.0.0.1:5001";
+public sealed class BackendConfig
+{
+    public string HubUrl { get; set; } = "wss://localhost:5001/hubs/agent";
+    public bool RequireWss { get; set; } = true;
+    public bool ValidateCertificates { get; set; } = true;
+    public string ExpectedCertificateThumbprint { get; set; } = string.Empty;
+    public int ConnectionTimeoutSeconds { get; set; } = 30;
+    public int HandshakeTimeoutSeconds { get; set; } = 15;
+}
 
-    /// <summary>
-    /// Endpoint URL for the real-time SignalR Hub (e.g. https://admin.cafe.lan:5001/hubs/agent or wss://...).
-    /// </summary>
-    [Required]
-    public string SignalRHubUrl { get; set; } = "https://127.0.0.1:5001/hubs/agent";
+public sealed class ReconnectionConfig
+{
+    public double InitialDelaySeconds { get; set; } = 2.0;
+    public double MaxDelaySeconds { get; set; } = 60.0;
+    public double BackoffMultiplier { get; set; } = 2.0;
+    public double JitterMaxSeconds { get; set; } = 3.0;
+    public int MaxReconnectAttempts { get; set; } = 0; // 0 = infinite
+}
 
-    /// <summary>
-    /// Interval in seconds between heartbeat transmissions. Default is 30 seconds.
-    /// </summary>
-    [Range(5, 3600)]
-    public int HeartbeatIntervalSeconds { get; set; } = 30;
+public sealed class HeartbeatConfig
+{
+    public int IntervalSeconds { get; set; } = 15;
+    public int TimeoutSeconds { get; set; } = 10;
+    public int MaxMissedHeartbeats { get; set; } = 3;
+}
 
-    /// <summary>
-    /// HTTP request timeout in seconds for REST API calls.
-    /// </summary>
-    [Range(2, 120)]
-    public int HttpTimeoutSeconds { get; set; } = 10;
+public sealed class IdentityConfig
+{
+    public string StorageDirectory { get; set; } = "data";
+    public string ClientVersion { get; set; } = "1.0.0";
+}
 
-    /// <summary>
-    /// Handshake and connection timeout in seconds for SignalR.
-    /// </summary>
-    [Range(5, 120)]
-    public int SignalRConnectionTimeoutSeconds { get; set; } = 15;
+public sealed class SecurityConfig
+{
+    public bool UseMachineScope { get; set; } = true;
+    public bool RejectNonWss { get; set; } = true;
+}
 
-    /// <summary>
-    /// Polling interval in seconds when device enrollment is in PendingApproval state.
-    /// </summary>
-    [Range(3, 600)]
-    public int EnrollmentPollIntervalSeconds { get; set; } = 10;
+public sealed class LoggingConfig
+{
+    public FileLogConfig File { get; set; } = new();
+}
 
-    /// <summary>
-    /// Minimum retry backoff delay in seconds.
-    /// </summary>
-    [Range(1, 60)]
-    public int MinRetryBackoffSeconds { get; set; } = 2;
-
-    /// <summary>
-    /// Maximum retry backoff delay in seconds.
-    /// </summary>
-    [Range(5, 1800)]
-    public int MaxRetryBackoffSeconds { get; set; } = 60;
-
-    /// <summary>
-    /// Cryptographic jitter factor (between 0.0 and 0.5) applied to retry delays.
-    /// </summary>
-    [Range(0.0, 0.5)]
-    public double BackoffJitterFactor { get; set; } = 0.2;
-
-    /// <summary>
-    /// Client Agent semantic version string.
-    /// </summary>
-    public string AgentVersion { get; set; } = "1.0.0-phase1";
-
-    /// <summary>
-    /// Message exchange protocol version.
-    /// </summary>
-    public string ProtocolVersion { get; set; } = "1.0";
-
-    /// <summary>
-    /// Optional custom data directory for identity and encrypted storage.
-    /// Defaults to %ProgramData%\GamingCafe\ClientAgent on Windows.
-    /// </summary>
-    public string? LocalDataDirectory { get; set; }
-
-    /// <summary>
-    /// Hosting environment name ("Production" or "Development").
-    /// </summary>
-    public string EnvironmentName { get; set; } = "Production";
-
-    /// <summary>
-    /// TLS validation strategy: "SystemTrust" (standard CA store) or "PinnedThumbprint".
-    /// </summary>
-    public string TlsValidationMode { get; set; } = "SystemTrust";
-
-    /// <summary>
-    /// Pinned SHA-256 certificate thumbprint if using self-signed certificate on cafe LAN.
-    /// </summary>
-    public string? PinnedCertificateThumbprint { get; set; }
+public sealed class FileLogConfig
+{
+    public string LogDirectory { get; set; } = "logs";
+    public int MaxFileSizeMb { get; set; } = 10;
+    public int RetainedFileDays { get; set; } = 14;
 }

@@ -1,86 +1,50 @@
 # Gaming Cafe Client Agent — Troubleshooting Guide
 
-This guide covers common operational issues, diagnostics, and recovery procedures.
+## 1. Common Diagnostics and Resolutions
+
+### Issue 1: Agent Fails to Connect with "Security validation rejected HubUrl"
+- **Cause**: The `Backend:HubUrl` configured in `appsettings.json` begins with `ws://` or `http://` while `RequireWss` is `true`.
+- **Resolution**: Edit `appsettings.json` and change the prefix to `wss://` or `https://`:
+  ```json
+  "HubUrl": "wss://admin.gamingcafe.local:5001/hubs/agent"
+  ```
 
 ---
 
-## 1. Quick Diagnostic Checklist
+### Issue 2: TLS Certificate Validation Error (`UntrustedRoot` / `NameMismatch`)
+- **Cause**: In development, the backend uses an untrusted self-signed certificate.
+- **Resolution**:
+  - In production: Install the cafe CA certificate into the Windows Computer Certificate Store under `Trusted Root Certification Authorities`.
+  - For local dev: Provide the server certificate SHA-256 thumbprint in `appsettings.json`:
+    ```json
+    "ExpectedCertificateThumbprint": "A1B2C3D4E5F6..."
+    ```
 
-Run the built-in diagnostic script from an elevated PowerShell prompt:
+---
 
+### Issue 3: Device Remains in `PendingApproval`
+- **Cause**: The device has registered successfully, but an administrator has not yet clicked "Approve" in the backend web dashboard.
+- **Resolution**: Open the admin dashboard, find the gaming PC matching the `DeviceId` shown in `data/device-identity.json`, and approve the device. Once approved, the backend emits `DeviceApproval` and heartbeats begin immediately.
+
+---
+
+### Issue 4: Corrupted Identity File
+- **Cause**: Sudden PC power outage interrupted file writing.
+- **Resolution**: The agent handles this automatically! It moves the corrupt file to `device-identity.json.corrupted.<timestamp>` and initializes a clean GUID identity without crashing.
+
+---
+
+### Issue 5: DPAPI Decryption Failure Across Machine Clones
+- **Cause**: A disk image from PC-01 was cloned to PC-02, but DPAPI machine keys are unique to each physical TPM / Windows installation.
+- **Resolution**: Delete `data/device-credentials.dat` on cloned PCs. The agent will cleanly request new credentials from the backend on next connection.
+
+---
+
+## 2. Inspecting Agent Logs
+
+Log files are located in `logs/clientagent-YYYY-MM-DD.log` (or `%ProgramData%\GamingCafeClientAgent\logs\`).
+
+To monitor live logs in PowerShell:
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\status-service.ps1
-```
-
-This inspects:
-- Windows Service registration and current status
-- Device identity existence and contents
-- Recent tail of the agent log file
-
----
-
-## 2. Common Issues & Solutions
-
-### A. Service Fails to Start (Status: Stopped immediately)
-**Symptoms**: `Start-Service "GamingCafe Client Agent"` fails or stops within 2 seconds.
-
-**Likely Causes**:
-1. **Configuration Validation Failure**:
-   - Check the log file at `C:\ProgramData\GamingCafe\ClientAgent\logs\agent-YYYY-MM-DD.log`.
-   - If `BackendApiBaseUrl` is set to `http://` or `SignalRHubUrl` is set to `ws://` in `Production` mode, the service fails fast by design. Change to `https://` / `wss://` or set `EnvironmentName` to `Development`.
-2. **Missing Binary or Wrong Path**:
-   - Verify `binPath` in `sc.exe qc "GamingCafe Client Agent"`.
-   - Ensure the executable and dependent DLLs exist in the specified folder.
-
----
-
-### B. SignalR Connection Fails / Reconnecting Continuously
-**Symptoms**: Log shows `SignalR connection dropped. Reconnecting with exponential backoff & jitter...`
-
-**Likely Causes**:
-1. **Backend SignalR Hub Offline**: The Admin backend is restarting or offline. The Agent will automatically reconnect when the Hub comes back online.
-2. **Untrusted TLS Certificate on WebSocket**: If the Admin PC uses a self-signed certificate, verify that:
-   - The root certificate is trusted in Windows Certificate Store, OR
-   - `TlsValidationMode` is set to `PinnedThumbprint` and `PinnedCertificateThumbprint` contains the Admin certificate's SHA-256 hash.
-3. **Automatic Fallback Verification**: Note that when SignalR is unavailable, presence heartbeats automatically fall back to the HTTPS REST API without interrupting service operations.
-
----
-
-### C. Corrupted Device Identity Recovery
-**Symptoms**: Identity file was truncated due to sudden power loss.
-
-**Agent Behavior**:
-- The Agent automatically detects malformed or truncated `device_identity.json`.
-- It moves the corrupted file to `device_identity_corrupt_YYYYMMDD_HHMMSS.bak`.
-- It generates a fresh, clean Device ID and resumes registration without crashing.
-
-**Manual Identity Reset**:
-To force a Gaming PC to re-register as a completely new device:
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\stop-service.ps1
-Remove-Item "C:\ProgramData\GamingCafe\ClientAgent\device_identity.json" -Force
-Remove-Item "C:\ProgramData\GamingCafe\ClientAgent\cred_*.dat" -Force
-powershell -ExecutionPolicy Bypass -File .\scripts\start-service.ps1
-```
-
----
-
-### D. Permission Denied / Access Denied
-**Symptoms**: `System.UnauthorizedAccessException` when accessing `%ProgramData%\GamingCafe\ClientAgent`.
-
-**Resolution**:
-Re-run the service installation script or apply permissions as Administrator:
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\install-service.ps1
-```
-
----
-
-## 3. Log Inspection
-The Client Agent writes structured, secret-sanitized logs to:
-`C:\ProgramData\GamingCafe\ClientAgent\logs\agent-YYYY-MM-DD.log`
-
-To watch live logs in PowerShell:
-```powershell
-Get-Content "C:\ProgramData\GamingCafe\ClientAgent\logs\agent-$(Get-Date -Format 'yyyy-MM-dd').log" -Wait -Tail 30
+Get-Content -Tail 50 -Wait "logs\clientagent-$(Get-Date -Format 'yyyy-MM-dd').log"
 ```

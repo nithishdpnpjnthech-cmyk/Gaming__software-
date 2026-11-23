@@ -1,136 +1,126 @@
-using GamingCafe.ClientAgent.Authentication;
+using System.Diagnostics;
 using GamingCafe.ClientAgent.Communication;
 using GamingCafe.ClientAgent.Configuration;
 using GamingCafe.ClientAgent.Health;
 using GamingCafe.ClientAgent.Identity;
-using GamingCafe.ClientAgent.Realtime;
+using GamingCafe.ClientAgent.Messaging;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 
 namespace GamingCafe.ClientAgent.Heartbeat;
 
-/// <summary>
-/// Contract for the heartbeat dispatcher.
-/// </summary>
-public interface IHeartbeatService
+public sealed class HeartbeatService : IHeartbeatService
 {
-    Task<bool> SendHeartbeatAsync(DeviceIdentity identity, CancellationToken cancellationToken = default);
-}
-
-/// <summary>
-/// Dispatches presence heartbeats periodically.
-/// Prefers real-time SignalR WebSocket communication; automatically falls back to HTTPS REST
-/// when SignalR is disconnected or fails.
-/// </summary>
-public class HeartbeatService : IHeartbeatService
-{
-    private readonly ISignalRHubClient _signalRClient;
-    private readonly IBackendApiClient _apiClient;
-    private readonly IDeviceAuthenticationService _authService;
+    private readonly ISignalRConnectionManager _connectionManager;
+    private readonly IDeviceIdentityService _identityService;
     private readonly IAgentHealthService _healthService;
-    private readonly IOptions<AgentConfiguration> _options;
+    private readonly IConfigurationService _configService;
     private readonly ILogger<HeartbeatService> _logger;
-    private readonly SemaphoreSlim _concurrencyGuard = new(1, 1);
+
+    private long _sequenceNumber;
+    private int _missedHeartbeats;
+    private double _lastLatencyMs;
+    private readonly Stopwatch _stopwatch = new();
+    private readonly object _lock = new();
 
     public HeartbeatService(
-        ISignalRHubClient signalRClient,
-        IBackendApiClient apiClient,
-        IDeviceAuthenticationService authService,
+        ISignalRConnectionManager connectionManager,
+        IDeviceIdentityService identityService,
         IAgentHealthService healthService,
-        IOptions<AgentConfiguration> options,
+        IConfigurationService configService,
         ILogger<HeartbeatService> logger)
     {
-        _signalRClient = signalRClient;
-        _apiClient = apiClient;
-        _authService = authService;
-        _healthService = healthService;
-        _options = options;
-        _logger = logger;
+        _connectionManager = connectionManager ?? throw new ArgumentNullException(nameof(connectionManager));
+        _identityService = identityService ?? throw new ArgumentNullException(nameof(identityService));
+        _healthService = healthService ?? throw new ArgumentNullException(nameof(healthService));
+        _configService = configService ?? throw new ArgumentNullException(nameof(configService));
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
-    public async Task<bool> SendHeartbeatAsync(DeviceIdentity identity, CancellationToken cancellationToken = default)
+    public long SequenceNumber => Interlocked.Read(ref _sequenceNumber);
+    public int MissedHeartbeats { get { lock (_lock) return _missedHeartbeats; } }
+    public double LastLatencyMs { get { lock (_lock) return _lastLatencyMs; } }
+
+    public async Task<bool> SendHeartbeatAsync(CancellationToken cancellationToken = default)
     {
-        // Concurrency guard: avoid overlapping heartbeat calls
-        if (!await _concurrencyGuard.WaitAsync(0, cancellationToken))
+        if (!_connectionManager.IsConnected)
         {
-            _logger.LogWarning("Heartbeat skipped: previous heartbeat is still in progress.");
+            _logger.LogDebug("Skipping heartbeat: SignalR is disconnected.");
             return false;
         }
+
+        var seq = Interlocked.Increment(ref _sequenceNumber);
+        var identity = _identityService.CurrentIdentity;
+        var metrics = _healthService.GetSnapshot();
+
+        var message = new HeartbeatMessage
+        {
+            DeviceId = identity.DeviceId,
+            SequenceNumber = seq,
+            AgentVersion = identity.ClientVersion,
+            UpTimeSeconds = metrics.UptimeSeconds,
+            CpuPercent = metrics.CpuPercent,
+            MemoryUsageMb = metrics.MemoryUsageMb,
+            TimestampUtc = DateTimeOffset.UtcNow
+        };
 
         try
         {
-            var secret = await _authService.GetDeviceSecretAsync(cancellationToken);
-            if (string.IsNullOrWhiteSpace(secret))
+            lock (_lock)
             {
-                _logger.LogWarning("Heartbeat aborted: No valid authentication secret available.");
-                return false;
+                _stopwatch.Restart();
             }
 
-            var health = _healthService.GetCurrentHealth();
-            var payload = new HeartbeatPayload
-            {
-                DeviceId = identity.DeviceId,
-                Hostname = identity.Hostname,
-                AgentVersion = _options.Value.AgentVersion,
-                ProtocolVersion = _options.Value.ProtocolVersion,
-                TimestampUtc = DateTime.UtcNow,
-                AgentStatus = health.AgentRunningState,
-                ServiceUptimeSeconds = health.ServiceUptimeSeconds,
-                ConnectionTransport = _signalRClient.IsConnected ? "SignalR" : "REST",
-                ProcessMemoryBytes = health.ProcessMemoryBytes,
-                LastCommunicationUtc = health.LastSuccessfulHeartbeatUtc
-            };
+            _logger.LogDebug("Dispatching SignalR heartbeat #{Sequence} (DeviceId: {DeviceId})", seq, identity.DeviceId);
+            await _connectionManager.SendAsync("SendHeartbeat", message, cancellationToken).ConfigureAwait(false);
+            _healthService.RecordHeartbeatSent();
 
-            // 1. Primary: Prefer SignalR WSS real-time connection
-            if (_signalRClient.IsConnected)
-            {
-                _logger.LogDebug("Sending heartbeat via primary transport: SignalR WSS");
-                var signalRSuccess = await _signalRClient.SendHeartbeatAsync(payload, cancellationToken);
-                if (signalRSuccess)
-                {
-                    _healthService.RecordHeartbeatSuccess();
-                    _logger.LogInformation("SignalR heartbeat acknowledged.");
-                    return true;
-                }
-                _logger.LogWarning("SignalR heartbeat failed. Engaging REST fallback...");
-            }
-            else
-            {
-                _logger.LogDebug("SignalR not connected. Using REST fallback transport.");
-            }
-
-            // 2. Secondary: Fallback to HTTPS REST API
-            var restPayload = payload with { ConnectionTransport = "REST" };
-            var response = await _apiClient.SendHeartbeatFallbackAsync(restPayload, secret, cancellationToken);
-
-            if (response.IsSuccess && response.Data != null)
-            {
-                _healthService.RecordHeartbeatSuccess();
-                _logger.LogInformation("REST fallback heartbeat acknowledged at {ServerTime} UTC",
-                    response.Data.ServerTimestampUtc);
-                return true;
-            }
-
-            _healthService.RecordApiFailure(response.ErrorMessage ?? "Heartbeat REST fallback failed.");
-            _logger.LogWarning("Heartbeat delivery failed on both SignalR and REST ({StatusCode}): {Error}",
-                response.StatusCode, response.ErrorMessage);
-
-            return false;
+            return true;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            _logger.LogInformation("Heartbeat cancelled due to service shutdown.");
+            _logger.LogDebug("Heartbeat #{Sequence} dispatch cancelled due to service shutdown.", seq);
             return false;
         }
         catch (Exception ex)
         {
-            _healthService.RecordApiFailure(ex.Message);
-            _logger.LogError(ex, "Unexpected error during heartbeat transmission.");
+            lock (_lock)
+            {
+                _missedHeartbeats++;
+            }
+            _logger.LogWarning("Failed to send SignalR heartbeat #{Sequence}: {Reason}. Missed count: {MissedCount}", seq, ex.Message, _missedHeartbeats);
+            _logger.LogDebug(ex, "Detailed exception for failed heartbeat #{Sequence}:", seq);
+
+            var maxMissed = _configService.CurrentConfiguration.Heartbeat.MaxMissedHeartbeats;
+            if (_missedHeartbeats >= maxMissed)
+            {
+                _logger.LogError("Missed {Count} consecutive heartbeats (threshold {Max}). SignalR connection may be stale.",
+                    _missedHeartbeats, maxMissed);
+            }
+
             return false;
         }
-        finally
+    }
+
+    public void HandleAcknowledgment(HeartbeatAcknowledgment ack)
+    {
+        ArgumentNullException.ThrowIfNull(ack);
+
+        lock (_lock)
         {
-            _concurrencyGuard.Release();
+            _stopwatch.Stop();
+            _lastLatencyMs = _stopwatch.Elapsed.TotalMilliseconds;
+            _missedHeartbeats = 0;
+        }
+
+        _healthService.RecordHeartbeatAcked(_lastLatencyMs);
+        _logger.LogDebug("Received HeartbeatAck #{Sequence} (RTT: {Latency:N1}ms)", ack.SequenceNumber, _lastLatencyMs);
+    }
+
+    public void ResetMissedCount()
+    {
+        lock (_lock)
+        {
+            _missedHeartbeats = 0;
         }
     }
 }
