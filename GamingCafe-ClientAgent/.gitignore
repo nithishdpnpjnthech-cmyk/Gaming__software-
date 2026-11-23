@@ -1,0 +1,38 @@
+## Build & Output directories
+bin/
+obj/
+out/
+publish/
+
+## IDE / Editor files
+.vs/
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+## Runtime data & state (Local to agent installation)
+.dotnet_home/
+state/
+credentials/
+logs/
+*.log
+
+## Secrets & Local overrides
+appsettings.Local.json
+appsettings.Production.json
+appsettings.secrets.json
+secrets.json
+*.key
+*.pfx
+*.pem
+
+## OS generated files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
