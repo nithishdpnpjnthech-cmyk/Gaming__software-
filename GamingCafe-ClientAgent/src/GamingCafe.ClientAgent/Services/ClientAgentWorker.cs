@@ -168,6 +168,12 @@ public sealed class ClientAgentWorker : BackgroundService
             }
         });
 
+        _messageHandler.RegisterHandler<DeviceErasedMessage>("DeviceErased", async msg =>
+        {
+            _logger.LogCritical("Received DeviceErased directive from backend: '{Message}'. Resetting identity and initiating clean re-registration.", msg.Message);
+            await HandleDeviceErasedAsync(CancellationToken.None).ConfigureAwait(false);
+        });
+
         _messageHandler.RegisterHandler<DeviceConfigurationMessage>("DeviceConfiguration", msg =>
         {
             _logger.LogInformation("Received dynamic configuration update (Version: {Version})", msg.ConfigVersion);
@@ -405,6 +411,11 @@ public sealed class ClientAgentWorker : BackgroundService
             {
                 _logger.LogDebug("Device {DeviceCode} is awaiting administrator approval in backend.", deviceCode);
             }
+            else if (result.Status == DeviceAuthResultStatus.NotFound)
+            {
+                _logger.LogWarning("Device {DeviceCode} was completely erased from backend database. Resetting identity and initiating clean re-registration...", deviceCode);
+                await HandleDeviceErasedAsync(stoppingToken).ConfigureAwait(false);
+            }
             else if (result.Status == DeviceAuthResultStatus.Denied)
             {
                 _logger.LogWarning("Device authentication was DENIED for {DeviceCode}: {Error}", deviceCode, result.ErrorMessage);
@@ -418,5 +429,31 @@ public sealed class ClientAgentWorker : BackgroundService
         {
             _logger.LogDebug(ex, "Exception during periodic device authentication check for {DeviceCode}.", deviceCode);
         }
+    }
+
+    private async Task HandleDeviceErasedAsync(CancellationToken stoppingToken)
+    {
+        var identity = _identityService.CurrentIdentity;
+        identity.BackendDeviceId = null;
+        identity.RegistrationStatus = "UNREGISTERED";
+        identity.LastUpdatedAtUtc = DateTimeOffset.UtcNow;
+        _identityStore.SaveIdentity(identity);
+
+        await _enrollmentService.HandleRevocationMessageAsync(new DeviceRevocationMessage
+        {
+            Reason = "Device was erased completely from backend database."
+        }).ConfigureAwait(false);
+
+        if (_connectionManager.IsConnected)
+        {
+            await _connectionManager.StopAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+
+        await _enrollmentService.TransitionToAsync(
+            EnrollmentState.Unregistered,
+            "Device was erased from backend database. Ready for re-registration.").ConfigureAwait(false);
+
+        // Immediately trigger clean device registration
+        await PerformDeviceRegistrationAsync(stoppingToken).ConfigureAwait(false);
     }
 }

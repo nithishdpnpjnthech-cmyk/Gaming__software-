@@ -235,6 +235,7 @@ public sealed class SignalRConnectionManager : ISignalRConnectionManager
         hub.On<HeartbeatAcknowledgment>("HeartbeatAck", msg => _messageHandler.ProcessInboundMessageAsync(msg));
         hub.On<DeviceConfigurationMessage>("DeviceConfiguration", msg => _messageHandler.ProcessInboundMessageAsync(msg));
         hub.On<DeviceRevocationMessage>("DeviceRevocation", msg => _messageHandler.ProcessInboundMessageAsync(msg));
+        hub.On<DeviceErasedMessage>("DeviceErased", msg => _messageHandler.ProcessInboundMessageAsync(msg));
         hub.On<ErrorMessage>("ErrorMessage", msg => _messageHandler.ProcessInboundMessageAsync(msg));
     }
 

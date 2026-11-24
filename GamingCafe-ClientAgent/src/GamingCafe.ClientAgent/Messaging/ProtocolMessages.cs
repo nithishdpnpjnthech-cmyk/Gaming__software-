@@ -77,6 +77,14 @@ public sealed class DeviceRevocationMessage : BaseMessage
     public DateTimeOffset RevokedAtUtc { get; set; } = DateTimeOffset.UtcNow;
 }
 
+public sealed class DeviceErasedMessage : BaseMessage
+{
+    public override string MessageType => "DeviceErased";
+    public string DeviceCode { get; set; } = string.Empty;
+    public string Message { get; set; } = string.Empty;
+    public DateTimeOffset ErasedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+}
+
 public sealed class ErrorMessage : BaseMessage
 {
     public override string MessageType => "ErrorMessage";

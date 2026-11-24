@@ -17,10 +17,14 @@ namespace GamingCafe.Api.Controllers;
 public class DevicesController : ControllerBase
 {
     private readonly GamingCafeDbContext _context;
+    private readonly IHubContext<AgentHub> _hubContext;
 
-    public DevicesController(GamingCafeDbContext context)
+    public DevicesController(
+        GamingCafeDbContext context,
+        IHubContext<AgentHub> hubContext)
     {
         _context = context;
+        _hubContext = hubContext;
     }
 
     // Register a new gaming PC
@@ -82,6 +86,20 @@ public class DevicesController : ControllerBase
 
             await _context.SaveChangesAsync();
             await transaction.CommitAsync();
+
+            try
+            {
+                await _hubContext.Clients.Group("dashboard_admins").SendAsync("DeviceRegistered", new
+                {
+                    Id = device.Id,
+                    DeviceCode = device.DeviceCode,
+                    DisplayName = device.DisplayName,
+                    RegistrationStatus = device.RegistrationStatus,
+                    AgentVersion = device.AgentVersion,
+                    CreatedAt = device.CreatedAt
+                });
+            }
+            catch { /* non-fatal */ }
 
             return CreatedAtAction(
                 nameof(GetDevice),
@@ -210,6 +228,18 @@ public class DevicesController : ControllerBase
             await _context.SaveChangesAsync();
             await transaction.CommitAsync();
 
+            try
+            {
+                await _hubContext.Clients.Group("dashboard_admins").SendAsync("DeviceApproved", new
+                {
+                    Id = device.Id,
+                    DeviceCode = device.DeviceCode,
+                    RegistrationStatus = device.RegistrationStatus,
+                    ApprovedAt = device.ApprovedAt
+                });
+            }
+            catch { /* non-fatal */ }
+
             return Ok(new
             {
                 Message = "Device approved successfully.",
@@ -285,6 +315,17 @@ public class DevicesController : ControllerBase
             await _context.SaveChangesAsync();
             await transaction.CommitAsync();
 
+            try
+            {
+                await _hubContext.Clients.Group("dashboard_admins").SendAsync("DeviceRejected", new
+                {
+                    Id = device.Id,
+                    DeviceCode = device.DeviceCode,
+                    RegistrationStatus = device.RegistrationStatus
+                });
+            }
+            catch { /* non-fatal */ }
+
             return Ok(new
             {
                 Message = "Device rejected successfully.",
@@ -303,9 +344,7 @@ public class DevicesController : ControllerBase
     // Revoke an approved or active device
     [Authorize(Policy = "devices.reject")]
     [HttpPost("{id:guid}/revoke")]
-    public async Task<IActionResult> RevokeDevice(
-        Guid id,
-        [FromServices] IHubContext<AgentHub> hubContext)
+    public async Task<IActionResult> RevokeDevice(Guid id)
     {
         var userIdValue =
             User.FindFirstValue(ClaimTypes.NameIdentifier);
@@ -375,12 +414,23 @@ public class DevicesController : ControllerBase
             await transaction.CommitAsync();
 
             // Broadcast real-time revocation event to the device SignalR group
-            await hubContext.Clients.Group($"device_{device.Id:D}").SendAsync("DeviceRevocation", new
+            try
             {
-                DeviceId = device.Id,
-                Reason = "Device enrollment was revoked by administrator.",
-                RevokedAtUtc = DateTimeOffset.UtcNow
-            });
+                await _hubContext.Clients.Group($"device_{device.Id:D}").SendAsync("DeviceRevocation", new
+                {
+                    DeviceId = device.Id,
+                    Reason = "Device enrollment was revoked by administrator.",
+                    RevokedAtUtc = DateTimeOffset.UtcNow
+                });
+
+                await _hubContext.Clients.Group("dashboard_admins").SendAsync("DeviceRevoked", new
+                {
+                    Id = device.Id,
+                    DeviceCode = device.DeviceCode,
+                    RegistrationStatus = device.RegistrationStatus
+                });
+            }
+            catch { /* non-fatal */ }
 
             return Ok(new
             {
@@ -456,6 +506,18 @@ public class DevicesController : ControllerBase
             await _context.SaveChangesAsync();
             await transaction.CommitAsync();
 
+            try
+            {
+                await _hubContext.Clients.Group("dashboard_admins").SendAsync("DeviceReauthorized", new
+                {
+                    Id = device.Id,
+                    DeviceCode = device.DeviceCode,
+                    RegistrationStatus = device.RegistrationStatus,
+                    ApprovedAt = device.ApprovedAt
+                });
+            }
+            catch { /* non-fatal */ }
+
             return Ok(new
             {
                 Message = "Device re-authorized successfully.",
@@ -464,6 +526,98 @@ public class DevicesController : ControllerBase
                 device.RegistrationStatus,
                 device.ApprovedBy,
                 device.ApprovedAt
+            });
+        }
+        catch
+        {
+            await transaction.RollbackAsync();
+            throw;
+        }
+    }
+
+    // Completely erase a device from the database
+    [Authorize(Policy = "devices.reject")]
+    [HttpDelete("{id:guid}")]
+    public async Task<IActionResult> DeleteDevice(Guid id)
+    {
+        var userIdValue =
+            User.FindFirstValue(ClaimTypes.NameIdentifier);
+
+        Guid? userId = null;
+        if (Guid.TryParse(userIdValue, out var parsedUserId))
+        {
+            var userExists = await _context.Users.AnyAsync(u => u.Id == parsedUserId);
+            if (userExists)
+            {
+                userId = parsedUserId;
+            }
+        }
+
+        await using var transaction =
+            await _context.Database.BeginTransactionAsync();
+
+        try
+        {
+            var device = await _context.Devices
+                .FirstOrDefaultAsync(d => d.Id == id);
+
+            if (device == null)
+            {
+                return NotFound("Device not found.");
+            }
+
+            var deviceId = device.Id;
+            var deviceCode = device.DeviceCode;
+
+            // 1. Notify the agent via SignalR if connected so it resets immediately
+            try
+            {
+                await _hubContext.Clients.Group($"device_{deviceId:D}").SendAsync("DeviceErased", new
+                {
+                    DeviceId = deviceId,
+                    DeviceCode = deviceCode,
+                    Message = "Device was completely erased from database. Local identity reset requested.",
+                    ErasedAtUtc = DateTimeOffset.UtcNow
+                });
+
+                await _hubContext.Clients.Group("dashboard_admins").SendAsync("DeviceDeleted", new
+                {
+                    Id = deviceId,
+                    DeviceCode = deviceCode
+                });
+            }
+            catch
+            {
+                // Non-fatal if SignalR dispatch fails
+            }
+
+            // 2. Add audit log
+            _context.AuditLogs.Add(new AuditLog
+            {
+                UserId = userId,
+                Action = "DEVICE_DELETED",
+                TargetType = "DEVICE",
+                TargetId = deviceId,
+                Details = JsonSerializer.Serialize(new
+                {
+                    message = $"Device {deviceCode} was completely erased from the database.",
+                    deviceCode,
+                    deviceId
+                }),
+                OccurredAt = DateTime.UtcNow
+            });
+
+            // 3. Delete the device from DB (cascades to all child relations)
+            _context.Devices.Remove(device);
+
+            await _context.SaveChangesAsync();
+            await transaction.CommitAsync();
+
+            return Ok(new
+            {
+                Message = $"Device {deviceCode} was erased completely from the database.",
+                DeviceId = deviceId,
+                DeviceCode = deviceCode
             });
         }
         catch

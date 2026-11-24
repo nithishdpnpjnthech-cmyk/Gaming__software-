@@ -97,6 +97,7 @@
       const [pendingDevices, setPendingDevices] = useState([]);
       const [loadingDevices, setLoadingDevices] = useState(false);
       const [liveLogs, setLiveLogs] = useState([]);
+      const [streamConnected, setStreamConnected] = useState(false);
 
       // Virtual Agent Simulator State
       const [simulatedDevice, setSimulatedDevice] = useState(null);
@@ -215,6 +216,134 @@
         const timer = setInterval(fetchDevices, 5000);
         return () => clearInterval(timer);
       }, [apiConnected, fetchDevices]);
+
+      // Real-Time SignalR Dashboard Telemetry Stream
+      useEffect(() => {
+        if (!adminToken) {
+          setStreamConnected(false);
+          return;
+        }
+
+        const hubUrl = `${apiBaseUrl}/hubs/agent`;
+        addLog('SIGNALR', 'info', `Connecting live dashboard stream to ${hubUrl}...`);
+
+        const conn = new signalR.HubConnectionBuilder()
+          .withUrl(hubUrl, {
+            accessTokenFactory: () => adminToken,
+            skipNegotiation: false
+          })
+          .withAutomaticReconnect([0, 2000, 5000, 10000])
+          .configureLogging(signalR.LogLevel.Warning)
+          .build();
+
+        conn.on('HeartbeatReceived', (data) => {
+          const devName = data.deviceCode || data.deviceId?.substring(0, 8);
+          addLog('HEARTBEAT', 'info', `💓 Station ${devName} | CPU: ${data.cpuPercent}% | RAM: ${data.memoryUsageMb} MB (Seq #${data.sequenceNumber})`, data);
+
+          // Update station real-time in React state
+          setDevices(prev => prev.map(d => {
+            if (d.id === data.deviceId) {
+              return {
+                ...d,
+                status: {
+                  ...d.status,
+                  lastSeenAt: data.timestamp,
+                  reportedPowerState: 'ON',
+                  lastIpAddress: data.ip || d.status?.lastIpAddress
+                },
+                liveCpu: data.cpuPercent,
+                liveMem: data.memoryUsageMb
+              };
+            }
+            return d;
+          }));
+        });
+
+        conn.on('AgentConnected', (data) => {
+          const devName = data.deviceCode || data.deviceId?.substring(0, 8);
+          addLog('CONNECTION', 'success', `🟢 Station ${devName} connected to SignalR Hub`, data);
+          setDevices(prev => prev.map(d => d.id === data.deviceId ? {
+            ...d,
+            status: {
+              ...d.status,
+              reportedPowerState: 'ON',
+              lastSeenAt: data.timestamp,
+              lastIpAddress: data.ip || d.status?.lastIpAddress
+            }
+          } : d));
+        });
+
+        conn.on('AgentDisconnected', (data) => {
+          const devName = data.deviceCode || data.deviceId?.substring(0, 8);
+          addLog('CONNECTION', 'warn', `🔴 Station ${devName} disconnected (${data.reason})`, data);
+          setDevices(prev => prev.map(d => d.id === data.deviceId ? {
+            ...d,
+            status: {
+              ...d.status,
+              reportedPowerState: 'OFF'
+            }
+          } : d));
+        });
+
+        conn.on('DeviceRegistered', (data) => {
+          addLog('ENROLLMENT', 'info', `✨ New gaming PC registered: ${data.deviceCode} (${data.displayName}) - waiting for approval!`);
+          fetchDevices();
+        });
+
+        conn.on('DeviceApproved', (data) => {
+          addLog('ENROLLMENT', 'success', `✅ Device ${data.deviceCode} approved!`);
+          fetchDevices();
+        });
+
+        conn.on('DeviceRejected', (data) => {
+          addLog('ENROLLMENT', 'warn', `🚫 Device ${data.deviceCode} rejected.`);
+          fetchDevices();
+        });
+
+        conn.on('DeviceRevoked', (data) => {
+          addLog('ENROLLMENT', 'warn', `⚠️ Device ${data.deviceCode} revoked.`);
+          fetchDevices();
+        });
+
+        conn.on('DeviceReauthorized', (data) => {
+          addLog('ENROLLMENT', 'success', `⚡ Device ${data.deviceCode} re-authorized!`);
+          fetchDevices();
+        });
+
+        conn.on('DeviceDeleted', (data) => {
+          addLog('ENROLLMENT', 'error', `🗑️ Device ${data.deviceCode} erased from database.`);
+          fetchDevices();
+        });
+
+        conn.start()
+          .then(() => {
+            setStreamConnected(true);
+            addLog('SIGNALR', 'success', '⚡ Live SignalR Telemetry stream connected and listening!');
+          })
+          .catch(err => {
+            setStreamConnected(false);
+            addLog('SIGNALR', 'error', `Failed to connect live telemetry stream: ${err.message}`);
+          });
+
+        conn.onreconnecting(() => {
+          setStreamConnected(false);
+          addLog('SIGNALR', 'warn', 'Live telemetry stream reconnecting...');
+        });
+
+        conn.onreconnected(() => {
+          setStreamConnected(true);
+          addLog('SIGNALR', 'success', 'Live telemetry stream restored!');
+          fetchDevices();
+        });
+
+        conn.onclose(() => {
+          setStreamConnected(false);
+        });
+
+        return () => {
+          conn.stop();
+        };
+      }, [adminToken, apiBaseUrl, fetchDevices, addLog]);
 
       // Admin Login Action
       const handleLogin = async (e) => {
@@ -335,6 +464,31 @@
           }
         } catch (err) {
           addLog('ACTION', 'error', `Re-authorization exception: ${err.message}`);
+        }
+      };
+
+      // Completely Erase Device from Database Action
+      const handleDeleteDevice = async (deviceId, deviceCode) => {
+        if (!confirm(`Are you sure you want to COMPLETELY ERASE station ${deviceCode} from the database?\n\nThis will purge the record so the PC agent will reset its local identity and submit a fresh registration for you to approve again.`)) return;
+        try {
+          addLog('ACTION', 'warn', `Submitting permanent erasure for ${deviceCode}...`);
+          const headers = { 'Content-Type': 'application/json' };
+          if (adminToken) headers['Authorization'] = `Bearer ${adminToken}`;
+
+          const res = await fetch(`${apiBaseUrl}/api/devices/${deviceId}`, {
+            method: 'DELETE',
+            headers
+          });
+
+          if (res.ok) {
+            addLog('ACTION', 'success', `Device ${deviceCode} completely ERASED from database! Client agent will re-appear in 'Pending Approvals' to be approved again.`);
+            fetchDevices();
+          } else {
+            const text = await res.text();
+            addLog('ACTION', 'error', `Erasure failed (${res.status}): ${text}`);
+          }
+        } catch (err) {
+          addLog('ACTION', 'error', `Erasure exception: ${err.message}`);
         }
       };
 
@@ -535,6 +689,13 @@
                   </span>
                 </div>
 
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs font-mono">
+                  <span className={`w-2.5 h-2.5 rounded-full ${streamConnected ? 'bg-cyan-400 shadow-md shadow-cyan-500/50 animate-pulse' : 'bg-slate-600'}`}></span>
+                  <span className={streamConnected ? 'text-cyan-300 font-medium' : 'text-slate-400'}>
+                    {streamConnected ? 'Live Stream Active' : 'Stream Standby'}
+                  </span>
+                </div>
+
                 {!adminToken ? (
                   <button
                     onClick={handleQuickDevLogin}
@@ -704,7 +865,19 @@
                             <tr key={dev.id} className="hover:bg-slate-900/50 transition">
                               <td className="py-3.5 px-4">
                                 <div className="font-semibold text-slate-200 font-sans text-sm">{dev.displayName || dev.deviceCode}</div>
-                                <div className="text-slate-500 text-xs">{dev.hostname || 'Unknown host'} (v{dev.agentVersion || '1.0'})</div>
+                                <div className="text-slate-500 text-xs flex flex-wrap items-center gap-1.5 mt-0.5">
+                                  <span>{dev.hostname || 'Unknown host'} (v{dev.agentVersion || '1.0'})</span>
+                                  {dev.liveCpu !== undefined && (
+                                    <span className="text-[10px] bg-cyan-950/80 text-cyan-300 px-1.5 py-0.5 rounded font-mono border border-cyan-800/60 font-semibold">
+                                      CPU {dev.liveCpu}%
+                                    </span>
+                                  )}
+                                  {dev.liveMem !== undefined && (
+                                    <span className="text-[10px] bg-emerald-950/80 text-emerald-300 px-1.5 py-0.5 rounded font-mono border border-emerald-800/60 font-semibold">
+                                      RAM {dev.liveMem} MB
+                                    </span>
+                                  )}
+                                </div>
                               </td>
                               <td className="py-3.5 px-4 text-cyan-400 font-bold">{dev.deviceCode}</td>
                               <td className="py-3.5 px-4">
@@ -735,41 +908,55 @@
                                 {status?.lastIpAddress || 'No IP logged'}
                               </td>
                               <td className="py-3.5 px-4 text-slate-400">
-                                {status?.lastSeenAt ? new Date(status.lastSeenAt).toLocaleTimeString() : 'Never'}
+                                <div className="flex items-center gap-1.5">
+                                  {status?.lastSeenAt && (
+                                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping"></span>
+                                  )}
+                                  <span>{status?.lastSeenAt ? new Date(status.lastSeenAt).toLocaleTimeString() : 'Never'}</span>
+                                </div>
                               </td>
                               <td className="py-3.5 px-4 text-right">
-                                {isPending ? (
-                                  <div className="flex items-center justify-end gap-1.5">
+                                <div className="flex items-center justify-end gap-1.5">
+                                  {isPending ? (
+                                    <>
+                                      <button
+                                        onClick={() => handleApproveDevice(dev.id, dev.deviceCode)}
+                                        className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded font-sans font-medium text-xs transition shadow-sm shadow-emerald-600/30"
+                                      >
+                                        Approve
+                                      </button>
+                                      <button
+                                        onClick={() => handleRejectDevice(dev.id, dev.deviceCode)}
+                                        className="px-2 py-1 bg-slate-800 hover:bg-rose-950 hover:text-rose-400 text-slate-400 rounded font-sans text-xs transition"
+                                      >
+                                        Reject
+                                      </button>
+                                    </>
+                                  ) : isApproved ? (
                                     <button
-                                      onClick={() => handleApproveDevice(dev.id, dev.deviceCode)}
-                                      className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded font-sans font-medium text-xs transition shadow-sm shadow-emerald-600/30"
+                                      onClick={() => handleRevokeDevice(dev.id, dev.deviceCode)}
+                                      className="px-2.5 py-1 bg-rose-950/80 hover:bg-rose-900 border border-rose-800 text-rose-300 hover:text-rose-100 rounded font-sans font-medium text-xs transition"
+                                      title="Revoke device authorization"
                                     >
-                                      Approve
+                                      Revoke
                                     </button>
+                                  ) : (
                                     <button
-                                      onClick={() => handleRejectDevice(dev.id, dev.deviceCode)}
-                                      className="px-2 py-1 bg-slate-800 hover:bg-rose-950 hover:text-rose-400 text-slate-400 rounded font-sans text-xs transition"
+                                      onClick={() => handleReauthorizeDevice(dev.id, dev.deviceCode)}
+                                      className="px-2.5 py-1 bg-cyan-600 hover:bg-cyan-500 text-white rounded font-sans font-medium text-xs transition shadow-sm shadow-cyan-600/30 flex items-center gap-1"
+                                      title="Re-authorize station"
                                     >
-                                      Reject
+                                      <span>⚡</span> Re-Authorize
                                     </button>
-                                  </div>
-                                ) : isApproved ? (
+                                  )}
                                   <button
-                                    onClick={() => handleRevokeDevice(dev.id, dev.deviceCode)}
-                                    className="px-2.5 py-1 bg-rose-950/80 hover:bg-rose-900 border border-rose-800 text-rose-300 hover:text-rose-100 rounded font-sans font-medium text-xs transition"
-                                    title="Revoke device authorization (Option A)"
+                                    onClick={() => handleDeleteDevice(dev.id, dev.deviceCode)}
+                                    className="p-1 text-slate-500 hover:text-rose-400 hover:bg-rose-950/40 rounded transition ml-1 text-xs"
+                                    title="Erase completely from DB (so it can re-register and be approved again)"
                                   >
-                                    Revoke
+                                    🗑️ Erase
                                   </button>
-                                ) : (
-                                  <button
-                                    onClick={() => handleReauthorizeDevice(dev.id, dev.deviceCode)}
-                                    className="px-2.5 py-1 bg-cyan-600 hover:bg-cyan-500 text-white rounded font-sans font-medium text-xs transition shadow-sm shadow-cyan-600/30 flex items-center gap-1 ml-auto"
-                                    title="Re-authorize station (Option A: In-place recovery)"
-                                  >
-                                    <span>⚡</span> Re-Authorize
-                                  </button>
-                                )}
+                                </div>
                               </td>
                             </tr>
                           );

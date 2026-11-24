@@ -28,8 +28,18 @@ public class AgentHub : Hub
         var deviceId = GetDeviceIdFromClaims();
         var clientIp = GetClientIpAddress();
 
-        _logger.LogInformation("Agent connected: ConnectionId={ConnectionId}, DeviceId={DeviceId}, IP={IP}",
-            Context.ConnectionId, deviceId, clientIp);
+        var isAdmin = Context.User?.IsInRole("SUPER_ADMIN") == true 
+                   || Context.User?.IsInRole("ADMIN") == true 
+                   || Context.User?.HasClaim("permission", "devices.view") == true;
+
+        if (isAdmin)
+        {
+            await Groups.AddToGroupAsync(Context.ConnectionId, "dashboard_admins");
+            _logger.LogInformation("Dashboard admin joined live telemetry stream: ConnectionId={ConnectionId}", Context.ConnectionId);
+        }
+
+        _logger.LogInformation("Agent/Client connected: ConnectionId={ConnectionId}, DeviceId={DeviceId}, IP={IP}, IsAdmin={IsAdmin}",
+            Context.ConnectionId, deviceId, clientIp, isAdmin);
 
         if (deviceId.HasValue)
         {
@@ -55,6 +65,16 @@ public class AgentHub : Hub
             });
 
             await _dbContext.SaveChangesAsync();
+
+            var devRecord = await _dbContext.Devices.AsNoTracking().FirstOrDefaultAsync(d => d.Id == deviceId.Value);
+            await Clients.Group("dashboard_admins").SendAsync("AgentConnected", new
+            {
+                DeviceId = deviceId.Value,
+                DeviceCode = devRecord?.DeviceCode,
+                DisplayName = devRecord?.DisplayName,
+                Ip = clientIp?.ToString(),
+                Timestamp = now
+            });
         }
 
         await base.OnConnectedAsync();
@@ -64,7 +84,7 @@ public class AgentHub : Hub
     {
         var deviceId = GetDeviceIdFromClaims();
 
-        _logger.LogInformation("Agent disconnected: ConnectionId={ConnectionId}, DeviceId={DeviceId}, Reason={Reason}",
+        _logger.LogInformation("Agent/Client disconnected: ConnectionId={ConnectionId}, DeviceId={DeviceId}, Reason={Reason}",
             Context.ConnectionId, deviceId, exception?.Message ?? "Normal closure");
 
         if (deviceId.HasValue)
@@ -88,6 +108,13 @@ public class AgentHub : Hub
             });
 
             await _dbContext.SaveChangesAsync();
+
+            await Clients.Group("dashboard_admins").SendAsync("AgentDisconnected", new
+            {
+                DeviceId = deviceId.Value,
+                Reason = exception?.Message ?? "Normal closure",
+                Timestamp = now
+            });
         }
 
         await base.OnDisconnectedAsync(exception);
@@ -129,6 +156,22 @@ public class AgentHub : Hub
             SequenceNumber = heartbeat.SequenceNumber,
             OriginalMessageId = heartbeat.MessageId,
             ServerTimestampUtc = DateTimeOffset.UtcNow
+        });
+
+        // Broadcast live telemetry to dashboard admins in real time
+        var dev = await _dbContext.Devices.AsNoTracking().FirstOrDefaultAsync(d => d.Id == targetDeviceId);
+        await Clients.Group("dashboard_admins").SendAsync("HeartbeatReceived", new
+        {
+            DeviceId = targetDeviceId,
+            DeviceCode = dev?.DeviceCode,
+            DisplayName = dev?.DisplayName,
+            SequenceNumber = heartbeat.SequenceNumber,
+            CpuPercent = heartbeat.CpuPercent,
+            MemoryUsageMb = heartbeat.MemoryUsageMb,
+            UpTimeSeconds = heartbeat.UpTimeSeconds,
+            AgentVersion = heartbeat.AgentVersion,
+            Ip = clientIp?.ToString(),
+            Timestamp = now
         });
     }
 
