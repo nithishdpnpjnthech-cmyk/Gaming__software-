@@ -55,12 +55,22 @@ public sealed class DeviceIdentityService : IDeviceIdentityService
                 var currentOs = RuntimeInformation.OSDescription;
                 var clientVer = _configService.CurrentConfiguration.Identity.ClientVersion;
 
+                if (string.IsNullOrEmpty(existing.DeviceCode))
+                {
+                    existing.DeviceCode = "PC-" + existing.DeviceId.ToString("N")[..8].ToUpperInvariant();
+                }
+                if (string.IsNullOrEmpty(existing.DisplayName))
+                {
+                    existing.DisplayName = existing.DeviceName;
+                }
+
                 if (existing.DeviceName != currentName ||
                     existing.MacAddress != currentMac ||
                     existing.OsVersion != currentOs ||
                     existing.ClientVersion != clientVer)
                 {
                     existing.DeviceName = currentName;
+                    existing.DisplayName = currentName;
                     existing.MacAddress = currentMac;
                     existing.OsVersion = currentOs;
                     existing.ClientVersion = clientVer;
@@ -79,7 +89,10 @@ public sealed class DeviceIdentityService : IDeviceIdentityService
             var identity = new DeviceIdentity
             {
                 DeviceId = newId,
+                DeviceCode = "PC-" + newId.ToString("N")[..8].ToUpperInvariant(),
+                DisplayName = Environment.MachineName,
                 DeviceName = Environment.MachineName,
+                RegistrationStatus = "UNREGISTERED",
                 HardwareIdentifier = GenerateHardwareFingerprint(),
                 MacAddress = GetPrimaryMacAddress(),
                 OsVersion = RuntimeInformation.OSDescription,

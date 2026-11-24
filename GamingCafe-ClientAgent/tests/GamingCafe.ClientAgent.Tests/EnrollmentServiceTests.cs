@@ -44,6 +44,39 @@ public class EnrollmentServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task InitializeState_WhenBackendDeviceIdPresent_SetsPendingApproval()
+    {
+        var identity = _identityService.GetOrCreateIdentity();
+        identity.BackendDeviceId = Guid.NewGuid();
+        identity.RegistrationStatus = "PENDING";
+        var idStore = new DeviceIdentityStore(_mockConfig, NullLogger<DeviceIdentityStore>.Instance);
+        idStore.SaveIdentity(identity);
+
+        var enrollment = new DeviceEnrollmentService(_identityService, _authService, NullLogger<DeviceEnrollmentService>.Instance);
+        await enrollment.InitializeStateAsync();
+
+        Assert.Equal(EnrollmentState.PendingApproval, enrollment.CurrentState);
+    }
+
+    [Fact]
+    public async Task InitializeState_WhenNoBackendDeviceId_EvenWithConflict_RemainsUnregistered()
+    {
+        var identity = _identityService.GetOrCreateIdentity();
+        identity.BackendDeviceId = null;
+        identity.RegistrationStatus = "CONFLICT";
+        var idStore = new DeviceIdentityStore(_mockConfig, NullLogger<DeviceIdentityStore>.Instance);
+        idStore.SaveIdentity(identity);
+
+        var enrollment = new DeviceEnrollmentService(_identityService, _authService, NullLogger<DeviceEnrollmentService>.Instance);
+        await enrollment.InitializeStateAsync();
+
+        // Must NOT assume approval or authentication or pending approval
+        Assert.Equal(EnrollmentState.Unregistered, enrollment.CurrentState);
+        Assert.NotEqual(EnrollmentState.Approved, enrollment.CurrentState);
+        Assert.NotEqual(EnrollmentState.Authenticated, enrollment.CurrentState);
+    }
+
+    [Fact]
     public async Task HandleApprovalMessage_WhenApproved_TransitionsToApproved()
     {
         var enrollment = new DeviceEnrollmentService(_identityService, _authService, NullLogger<DeviceEnrollmentService>.Instance);

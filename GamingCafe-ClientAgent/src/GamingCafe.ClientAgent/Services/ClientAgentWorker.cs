@@ -12,8 +12,10 @@ namespace GamingCafe.ClientAgent.Services;
 public sealed class ClientAgentWorker : BackgroundService
 {
     private readonly ISignalRConnectionManager _connectionManager;
+    private readonly IBackendApiClient _backendApiClient;
     private readonly IDeviceEnrollmentService _enrollmentService;
     private readonly IDeviceIdentityService _identityService;
+    private readonly IDeviceIdentityStore _identityStore;
     private readonly IHeartbeatService _heartbeatService;
     private readonly IConnectionStateManager _connectionStateManager;
     private readonly IConfigurationService _configService;
@@ -23,8 +25,10 @@ public sealed class ClientAgentWorker : BackgroundService
 
     public ClientAgentWorker(
         ISignalRConnectionManager connectionManager,
+        IBackendApiClient backendApiClient,
         IDeviceEnrollmentService enrollmentService,
         IDeviceIdentityService identityService,
+        IDeviceIdentityStore identityStore,
         IHeartbeatService heartbeatService,
         IConnectionStateManager connectionStateManager,
         IConfigurationService configService,
@@ -33,8 +37,10 @@ public sealed class ClientAgentWorker : BackgroundService
         ILogger<ClientAgentWorker> logger)
     {
         _connectionManager = connectionManager ?? throw new ArgumentNullException(nameof(connectionManager));
+        _backendApiClient = backendApiClient ?? throw new ArgumentNullException(nameof(backendApiClient));
         _enrollmentService = enrollmentService ?? throw new ArgumentNullException(nameof(enrollmentService));
         _identityService = identityService ?? throw new ArgumentNullException(nameof(identityService));
+        _identityStore = identityStore ?? throw new ArgumentNullException(nameof(identityStore));
         _heartbeatService = heartbeatService ?? throw new ArgumentNullException(nameof(heartbeatService));
         _connectionStateManager = connectionStateManager ?? throw new ArgumentNullException(nameof(connectionStateManager));
         _configService = configService ?? throw new ArgumentNullException(nameof(configService));
@@ -46,6 +52,10 @@ public sealed class ClientAgentWorker : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("Gaming Cafe Client Agent starting up as Windows Service...");
+
+        var config = _configService.CurrentConfiguration;
+        _logger.LogInformation("Loaded Runtime Configuration: ApiBaseUrl='{ApiBaseUrl}', HubUrl='{HubUrl}', EnableSignalR={EnableSignalR}, RequireWss={RequireWss}, RejectNonWss={RejectNonWss}, StorageDirectory='{StorageDir}', HttpTimeout={HttpTimeout}s",
+            config.Backend.ApiBaseUrl, config.Backend.HubUrl, config.Backend.EnableSignalR, config.Backend.RequireWss, config.Security.RejectNonWss, config.Identity.StorageDirectory, config.Backend.HttpTimeoutSeconds);
 
         try
         {
@@ -60,10 +70,20 @@ public sealed class ClientAgentWorker : BackgroundService
             // 3. Register message dispatch handlers
             RegisterProtocolHandlers();
 
-            // 4. Connect to SignalR Backend Hub over WebSocket Secure (WSS)
-            await ConnectWithRetryLoopAsync(stoppingToken).ConfigureAwait(false);
+            // 4. Perform Backend REST Device Registration if not already registered
+            await PerformDeviceRegistrationAsync(stoppingToken).ConfigureAwait(false);
 
-            // 5. Main execution loop
+            // 5. Connect to SignalR Backend Hub if enabled
+            if (_configService.CurrentConfiguration.Backend.EnableSignalR)
+            {
+                await ConnectWithRetryLoopAsync(stoppingToken).ConfigureAwait(false);
+            }
+            else
+            {
+                _logger.LogInformation("SignalR duplex channel paused: Backend SignalR Hub is not deployed. Agent operating in standalone REST registration and local telemetry mode.");
+            }
+
+            // 6. Main execution loop
             while (!stoppingToken.IsCancellationRequested)
             {
                 try
@@ -71,10 +91,15 @@ public sealed class ClientAgentWorker : BackgroundService
                     var intervalSeconds = _configService.CurrentConfiguration.Heartbeat.IntervalSeconds;
                     await Task.Delay(TimeSpan.FromSeconds(intervalSeconds), stoppingToken).ConfigureAwait(false);
 
-                    // If connected, perform state actions
+                    // If connected to SignalR Hub, dispatch actions
                     if (_connectionManager.IsConnected)
                     {
                         await PerformConnectedActionsAsync(stoppingToken).ConfigureAwait(false);
+                    }
+                    else if (_enrollmentService.CurrentState == EnrollmentState.PendingApproval)
+                    {
+                        _logger.LogDebug("Device {DeviceId} (Code: {Code}) is awaiting administrator approval in backend dashboard.",
+                            identity.DeviceId, identity.DeviceCode);
                     }
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -94,7 +119,10 @@ public sealed class ClientAgentWorker : BackgroundService
         finally
         {
             _logger.LogInformation("Gaming Cafe Client Agent service shutting down gracefully.");
-            await _connectionManager.StopAsync(CancellationToken.None).ConfigureAwait(false);
+            if (_configService.CurrentConfiguration.Backend.EnableSignalR)
+            {
+                await _connectionManager.StopAsync(CancellationToken.None).ConfigureAwait(false);
+            }
         }
     }
 
@@ -143,7 +171,7 @@ public sealed class ClientAgentWorker : BackgroundService
                 _logger.LogInformation("SignalR WebSocket connection established successfully with backend: '{HubUrl}'", hubUrl);
 
                 // Check registration immediately upon connect
-                await CheckAndSendRegistrationAsync(stoppingToken).ConfigureAwait(false);
+                await PerformDeviceRegistrationAsync(stoppingToken).ConfigureAwait(false);
                 return;
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -181,7 +209,7 @@ public sealed class ClientAgentWorker : BackgroundService
         switch (state)
         {
             case EnrollmentState.Unregistered:
-                await CheckAndSendRegistrationAsync(stoppingToken).ConfigureAwait(false);
+                await PerformDeviceRegistrationAsync(stoppingToken).ConfigureAwait(false);
                 break;
 
             case EnrollmentState.PendingApproval:
@@ -203,26 +231,112 @@ public sealed class ClientAgentWorker : BackgroundService
         }
     }
 
-    private async Task CheckAndSendRegistrationAsync(CancellationToken stoppingToken)
+    private async Task PerformDeviceRegistrationAsync(CancellationToken stoppingToken)
     {
-        if (_enrollmentService.CurrentState == EnrollmentState.Unregistered)
+        var identity = _identityService.CurrentIdentity;
+
+        // If already registered with backend and has a confirmed BackendDeviceId, skip initial registration call
+        if (identity.BackendDeviceId.HasValue)
         {
-            var identity = _identityService.CurrentIdentity;
-            _logger.LogInformation("Sending device registration message to hub for {DeviceId} ({DeviceName})...",
-                identity.DeviceId, identity.DeviceName);
+            _logger.LogInformation("Device {DeviceId} is already registered with backend (Backend DeviceId: {BackendId}, Status: {Status}).",
+                identity.DeviceId, identity.BackendDeviceId, identity.RegistrationStatus);
+            return;
+        }
 
-            var regMsg = new DeviceRegistrationMessage
+        var attempt = 0;
+        var request = new DeviceRegistrationRequestDto
+        {
+            DeviceCode = string.IsNullOrWhiteSpace(identity.DeviceCode) 
+                ? "PC-" + identity.DeviceId.ToString("N")[..8].ToUpperInvariant() 
+                : identity.DeviceCode,
+            DisplayName = string.IsNullOrWhiteSpace(identity.DisplayName) 
+                ? identity.DeviceName 
+                : identity.DisplayName,
+            Hostname = identity.DeviceName,
+            HardwareFingerprintHash = identity.HardwareIdentifier,
+            AgentVersion = identity.ClientVersion
+        };
+
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            attempt++;
+            try
             {
-                DeviceId = identity.DeviceId,
-                DeviceName = identity.DeviceName,
-                HardwareIdentifier = identity.HardwareIdentifier,
-                MacAddress = identity.MacAddress,
-                OsVersion = identity.OsVersion,
-                ClientVersion = identity.ClientVersion
-            };
+                _logger.LogInformation("Attempting device registration with backend at '{ApiUrl}' (attempt {Attempt})...",
+                    _configService.CurrentConfiguration.Backend.ApiBaseUrl, attempt);
 
-            await _connectionManager.SendAsync("RegisterDevice", regMsg, stoppingToken).ConfigureAwait(false);
-            await _enrollmentService.TransitionToAsync(EnrollmentState.PendingApproval, "Registration request sent to backend.").ConfigureAwait(false);
+                var result = await _backendApiClient.RegisterDeviceAsync(request, stoppingToken).ConfigureAwait(false);
+
+                if (result.Status == RegistrationResultStatus.Success)
+                {
+                    identity.BackendDeviceId = result.Data!.Id;
+                    identity.RegistrationStatus = result.Data.RegistrationStatus; // "PENDING"
+                    identity.LastUpdatedAtUtc = DateTimeOffset.UtcNow;
+                    _identityStore.SaveIdentity(identity);
+
+                    await _enrollmentService.TransitionToAsync(
+                        EnrollmentState.PendingApproval, 
+                        $"Registered successfully with backend ID {result.Data.Id}.").ConfigureAwait(false);
+
+                    _logger.LogInformation("Device registration complete! Awaiting admin approval. Backend DeviceId: {Id}", result.Data.Id);
+                    return;
+                }
+
+                if (result.Status == RegistrationResultStatus.AlreadyExists)
+                {
+                    // Strict rule: Do NOT assume a 409 response proves that the existing device belongs to this Agent.
+                    // The backend does not return a device ID or proof of ownership on 409.
+                    // We must NOT treat 409 Conflict as approval, authentication, or automatic ownership.
+                    _logger.LogError("Registration conflict (HTTP 409 Conflict): Device code '{DeviceCode}' already exists on backend, but this agent has no confirmed BackendDeviceId. Cannot assume existing registration belongs to this agent. Halting automatic registration until device code is changed or existing device is resolved in backend.",
+                        request.DeviceCode);
+
+                    identity.RegistrationStatus = "CONFLICT";
+                    identity.LastUpdatedAtUtc = DateTimeOffset.UtcNow;
+                    _identityStore.SaveIdentity(identity);
+
+                    await _enrollmentService.TransitionToAsync(
+                        EnrollmentState.Error, 
+                        $"Device code '{request.DeviceCode}' conflicts with existing backend record. Cannot assume ownership.").ConfigureAwait(false);
+                    return;
+                }
+
+                if (result.Status == RegistrationResultStatus.ValidationError)
+                {
+                    _logger.LogError("Backend rejected device registration with validation error (HTTP 400): {Error}",
+                        result.ErrorMessage);
+                    return;
+                }
+
+                // For NetworkFailure or ServerError, retry with exponential backoff
+                var delay = _reconnectionService.CalculateNextDelay(attempt);
+                _logger.LogWarning("Device registration attempt failed [{Status}]: {Error}. Retrying in {Delay:N1}s (attempt {Attempt})...",
+                    result.Status, result.ErrorMessage, delay.TotalSeconds, attempt);
+
+                await Task.Delay(delay, stoppingToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                _logger.LogInformation("Registration loop cancelled due to service shutdown.");
+                return;
+            }
+            catch (Exception ex)
+            {
+                var (category, reason) = ConnectionErrorClassifier.Classify(ex);
+                var delay = _reconnectionService.CalculateNextDelay(attempt);
+
+                _logger.LogWarning("Registration attempt threw exception [{Category}]: {Reason}. Retrying in {Delay:N1}s (attempt {Attempt})...",
+                    category, reason, delay.TotalSeconds, attempt);
+                _logger.LogDebug(ex, "Detailed exception during registration retry loop:");
+
+                try
+                {
+                    await Task.Delay(delay, stoppingToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    return;
+                }
+            }
         }
     }
 }

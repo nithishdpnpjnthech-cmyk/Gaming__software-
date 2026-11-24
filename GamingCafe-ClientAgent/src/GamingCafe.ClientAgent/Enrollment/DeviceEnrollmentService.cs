@@ -50,6 +50,12 @@ public sealed class DeviceEnrollmentService : IDeviceEnrollmentService
                 _currentState = EnrollmentState.Approved;
                 _logger.LogInformation("Device {DeviceId} approved, token refresh needed.", identity.DeviceId);
             }
+            else if (identity.BackendDeviceId.HasValue)
+            {
+                _currentState = EnrollmentState.PendingApproval;
+                _logger.LogInformation("Device {DeviceId} (Code: {Code}) is registered with backend ID {BackendId} and awaiting administrator approval.",
+                    identity.DeviceId, identity.DeviceCode, identity.BackendDeviceId);
+            }
             else
             {
                 _currentState = EnrollmentState.Unregistered;

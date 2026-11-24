@@ -9,6 +9,7 @@ using GamingCafe.ClientAgent.Logging;
 using GamingCafe.ClientAgent.Messaging;
 using GamingCafe.ClientAgent.Security;
 using GamingCafe.ClientAgent.Services;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -37,6 +38,34 @@ public static class Program
         {
             options.ServiceName = "GamingCafe Client Agent";
         });
+
+        // Ensure configuration files are resolved regardless of launch CWD
+        var candidateDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            AppContext.BaseDirectory,
+            builder.Environment.ContentRootPath,
+            Directory.GetCurrentDirectory(),
+            Path.Combine(Directory.GetCurrentDirectory(), "src", "GamingCafe.ClientAgent")
+        };
+
+        foreach (var dir in candidateDirs)
+        {
+            if (Directory.Exists(dir))
+            {
+                var mainJson = Path.Combine(dir, "appsettings.json");
+                var envJson = Path.Combine(dir, $"appsettings.{builder.Environment.EnvironmentName}.json");
+
+                if (File.Exists(mainJson))
+                {
+                    builder.Configuration.AddJsonFile(mainJson, optional: true, reloadOnChange: true);
+                }
+                if (File.Exists(envJson))
+                {
+                    builder.Configuration.AddJsonFile(envJson, optional: true, reloadOnChange: true);
+                }
+            }
+        }
+        builder.Configuration.AddEnvironmentVariables();
 
         // 1. Independent File Logger Options extracted cleanly from raw IConfiguration
         var loggingConfig = builder.Configuration.GetSection("Logging:File");
@@ -77,6 +106,23 @@ public static class Program
         builder.Services.AddSingleton<IDeviceEnrollmentService, DeviceEnrollmentService>();
 
         // 8. Communication
+        builder.Services.AddSingleton(sp =>
+        {
+            var secService = sp.GetRequiredService<ISecurityValidationService>();
+            var handler = new SocketsHttpHandler
+            {
+                SslOptions =
+                {
+                    RemoteCertificateValidationCallback = (sender, cert, chain, errors) =>
+                    {
+                        var cert2 = cert as System.Security.Cryptography.X509Certificates.X509Certificate2;
+                        return secService.ValidateServerCertificate(null, cert2, chain, errors);
+                    }
+                }
+            };
+            return new HttpClient(handler);
+        });
+        builder.Services.AddSingleton<IBackendApiClient, BackendApiClient>();
         builder.Services.AddSingleton<IConnectionStateManager, ConnectionStateManager>();
         builder.Services.AddSingleton<IReconnectionService, ReconnectionService>();
         builder.Services.AddSingleton<ISignalRConnectionManager, SignalRConnectionManager>();

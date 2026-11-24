@@ -64,6 +64,56 @@ public class DeviceIdentityTests : IDisposable
         Assert.NotEmpty(quarantined);
     }
 
+    [Fact]
+    public void MultipleAgentInstances_RetainSeparateIdentities_AndUniqueDeviceCodes()
+    {
+        var tempDirA = Path.Combine(Path.GetTempPath(), "AgentTest_InstA_" + Guid.NewGuid().ToString("N"));
+        var tempDirB = Path.Combine(Path.GetTempPath(), "AgentTest_InstB_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDirA);
+        Directory.CreateDirectory(tempDirB);
+
+        try
+        {
+            var configA = new AgentConfiguration();
+            configA.Identity.StorageDirectory = tempDirA;
+            var mockConfigA = new MockConfigurationService(configA);
+            var storeA = new DeviceIdentityStore(mockConfigA, NullLogger<DeviceIdentityStore>.Instance);
+            var serviceA = new DeviceIdentityService(storeA, mockConfigA, NullLogger<DeviceIdentityService>.Instance);
+
+            var configB = new AgentConfiguration();
+            configB.Identity.StorageDirectory = tempDirB;
+            var mockConfigB = new MockConfigurationService(configB);
+            var storeB = new DeviceIdentityStore(mockConfigB, NullLogger<DeviceIdentityStore>.Instance);
+            var serviceB = new DeviceIdentityService(storeB, mockConfigB, NullLogger<DeviceIdentityService>.Instance);
+
+            var identityA = serviceA.GetOrCreateIdentity();
+            var identityB = serviceB.GetOrCreateIdentity();
+
+            Assert.NotEqual(Guid.Empty, identityA.DeviceId);
+            Assert.NotEqual(Guid.Empty, identityB.DeviceId);
+            Assert.NotEqual(identityA.DeviceId, identityB.DeviceId);
+            Assert.NotEqual(identityA.DeviceCode, identityB.DeviceCode);
+            Assert.StartsWith("PC-", identityA.DeviceCode);
+            Assert.StartsWith("PC-", identityB.DeviceCode);
+
+            // Persisted independently
+            var reloadedA = storeA.LoadIdentity();
+            var reloadedB = storeB.LoadIdentity();
+
+            Assert.NotNull(reloadedA);
+            Assert.NotNull(reloadedB);
+            Assert.Equal(identityA.DeviceId, reloadedA.DeviceId);
+            Assert.Equal(identityB.DeviceId, reloadedB.DeviceId);
+            Assert.Equal(identityA.DeviceCode, reloadedA.DeviceCode);
+            Assert.Equal(identityB.DeviceCode, reloadedB.DeviceCode);
+        }
+        finally
+        {
+            try { Directory.Delete(tempDirA, true); } catch { }
+            try { Directory.Delete(tempDirB, true); } catch { }
+        }
+    }
+
     public void Dispose()
     {
         try

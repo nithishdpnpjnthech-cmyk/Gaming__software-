@@ -13,6 +13,27 @@ public static class ConfigurationValidator
         }
 
         // Backend validation
+        if (!string.IsNullOrWhiteSpace(config.Backend.ApiBaseUrl))
+        {
+            if (!Uri.TryCreate(config.Backend.ApiBaseUrl, UriKind.Absolute, out var apiUri))
+            {
+                errors.Add($"Invalid ApiBaseUrl format: '{config.Backend.ApiBaseUrl}'.");
+            }
+            else
+            {
+                var apiScheme = apiUri.Scheme.ToLowerInvariant();
+                if (config.Security.RejectNonWss && apiScheme != "https" && apiScheme != "http")
+                {
+                    errors.Add($"Unsupported ApiBaseUrl scheme '{apiScheme}'.");
+                }
+            }
+        }
+
+        if (config.Backend.HttpTimeoutSeconds <= 0)
+        {
+            errors.Add("HttpTimeoutSeconds must be greater than 0.");
+        }
+
         if (string.IsNullOrWhiteSpace(config.Backend.HubUrl))
         {
             errors.Add("Backend HubUrl cannot be empty.");

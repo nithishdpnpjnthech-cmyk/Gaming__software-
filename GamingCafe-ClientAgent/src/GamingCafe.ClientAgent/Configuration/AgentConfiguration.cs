@@ -12,12 +12,15 @@ public sealed class AgentConfiguration
 
 public sealed class BackendConfig
 {
+    public string ApiBaseUrl { get; set; } = "http://localhost:5022";
     public string HubUrl { get; set; } = "wss://localhost:5001/hubs/agent";
+    public bool EnableSignalR { get; set; } = false;
     public bool RequireWss { get; set; } = true;
     public bool ValidateCertificates { get; set; } = true;
     public string ExpectedCertificateThumbprint { get; set; } = string.Empty;
     public int ConnectionTimeoutSeconds { get; set; } = 30;
     public int HandshakeTimeoutSeconds { get; set; } = 15;
+    public int HttpTimeoutSeconds { get; set; } = 15;
 }
 
 public sealed class ReconnectionConfig

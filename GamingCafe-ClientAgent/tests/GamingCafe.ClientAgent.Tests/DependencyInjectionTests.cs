@@ -74,6 +74,9 @@ public class DependencyInjectionTests
         var connManager = host.Services.GetRequiredService<ISignalRConnectionManager>();
         Assert.NotNull(connManager);
 
+        var apiClient = host.Services.GetRequiredService<IBackendApiClient>();
+        Assert.NotNull(apiClient);
+
         // 5. Health & Heartbeat
         var healthService = host.Services.GetRequiredService<IAgentHealthService>();
         Assert.NotNull(healthService);
@@ -101,6 +104,7 @@ public class DependencyInjectionTests
         Assert.NotNull(sp);
         using var scope = sp.CreateScope();
         Assert.NotNull(scope.ServiceProvider.GetRequiredService<ISignalRConnectionManager>());
+        Assert.NotNull(scope.ServiceProvider.GetRequiredService<IBackendApiClient>());
         Assert.NotNull(scope.ServiceProvider.GetRequiredService<ILoggerFactory>());
     }
 }

@@ -36,3 +36,24 @@ Thumbs.db
 ehthumbs.db
 Desktop.ini
 $RECYCLE.BIN/
+
+
+# ==========================================
+# Gaming Cafe Client Agent - Local Files
+# ==========================================
+
+# Local device identity and registration data
+GamingCafe-ClientAgent/data/
+GamingCafe-ClientAgent/src/GamingCafe.ClientAgent/data-dev/
+
+# Local documentation and temporary reports
+GamingCafe-ClientAgent/Documentation/
+
+# Agent-specific local configuration
+GamingCafe-ClientAgent/appsettings.agent*.json
+
+# Test and temporary output
+TestResults/
+coverage/
+*.trx
+
