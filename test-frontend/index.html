@@ -1,0 +1,1064 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GCMS Control Console — Gaming Cafe Management System</title>
+  
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#ecfeff',
+              100: '#cffafe',
+              400: '#22d3ee',
+              500: '#06b6d4',
+              600: '#0891b2',
+            },
+            surface: {
+              800: '#1e293b',
+              900: '#0f172a',
+              950: '#020617',
+            }
+          },
+          fontFamily: {
+            mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', 'monospace']
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- React 18, ReactDOM 18, Babel Standalone -->
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- Microsoft SignalR Client CDN -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/8.0.7/signalr.min.js"></script>
+
+  <!-- Lucide Icons CDN -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+
+  <style>
+    @keyframes pulse-subtle {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+    .pulse-online { animation: pulse-subtle 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+    .glass {
+      background: rgba(15, 23, 42, 0.75);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .custom-scrollbar::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    .custom-scrollbar::-webkit-scrollbar-track {
+      background: #0f172a;
+    }
+    .custom-scrollbar::-webkit-scrollbar-thumb {
+      background: #334155;
+      border-radius: 3px;
+    }
+    .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+      background: #475569;
+    }
+  </style>
+</head>
+<body class="bg-surface-950 text-slate-100 font-sans antialiased min-h-screen selection:bg-brand-500 selection:text-surface-950">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useCallback } = React;
+
+    function App() {
+      // Configuration & Authentication State
+      const [apiBaseUrl, setApiBaseUrl] = useState(() => localStorage.getItem('gcms_api_url') || 'http://localhost:5022');
+      const [adminToken, setAdminToken] = useState(() => localStorage.getItem('gcms_admin_token') || '');
+      const [authUsername, setAuthUsername] = useState('admin');
+      const [authPassword, setAuthPassword] = useState('');
+      const [activeTab, setActiveTab] = useState('stations');
+
+      // System Health State
+      const [apiConnected, setApiConnected] = useState(false);
+      const [checkingApi, setCheckingApi] = useState(false);
+      const [lastError, setLastError] = useState(null);
+
+      // Devices & Telemetry State
+      const [devices, setDevices] = useState([]);
+      const [pendingDevices, setPendingDevices] = useState([]);
+      const [loadingDevices, setLoadingDevices] = useState(false);
+      const [liveLogs, setLiveLogs] = useState([]);
+
+      // Virtual Agent Simulator State
+      const [simulatedDevice, setSimulatedDevice] = useState(null);
+      const [simulatedToken, setSimulatedToken] = useState(null);
+      const [simHeartbeatActive, setSimHeartbeatActive] = useState(false);
+      const [simSeq, setSimSeq] = useState(1);
+      const simConnectionRef = useRef(null);
+
+      // Save persistent settings
+      useEffect(() => {
+        localStorage.setItem('gcms_api_url', apiBaseUrl);
+      }, [apiBaseUrl]);
+
+      useEffect(() => {
+        localStorage.setItem('gcms_admin_token', adminToken);
+      }, [adminToken]);
+
+      // Add a log message to the telemetry feed
+      const addLog = useCallback((source, type, message, meta = null) => {
+        setLiveLogs(prev => [
+          {
+            id: Math.random().toString(36).substring(2, 9),
+            time: new Date().toLocaleTimeString(),
+            source,
+            type, // 'info' | 'success' | 'warn' | 'error'
+            message,
+            meta
+          },
+          ...prev.slice(0, 99) // Keep last 100 entries
+        ]);
+      }, []);
+
+      // Check Backend Health
+      const pingBackend = useCallback(async (customUrl = apiBaseUrl) => {
+        setCheckingApi(true);
+        setLastError(null);
+        try {
+          const res = await fetch(`${customUrl}/weatherforecast`, { method: 'GET' });
+          if (res.ok) {
+            setApiConnected(true);
+            addLog('API', 'success', `Connected to backend at ${customUrl}`);
+          } else {
+            setApiConnected(false);
+            setLastError(`Backend returned HTTP ${res.status}`);
+          }
+        } catch (err) {
+          setApiConnected(false);
+          setLastError(err.message || 'Network unreachable');
+          addLog('API', 'error', `Failed to reach backend at ${customUrl}: ${err.message}`);
+        } finally {
+          setCheckingApi(false);
+        }
+      }, [apiBaseUrl, addLog]);
+
+      // Fetch Devices List
+      const fetchDevices = useCallback(async () => {
+        if (!adminToken) {
+          return;
+        }
+        setLoadingDevices(true);
+        try {
+          const headers = { 
+            'Accept': 'application/json',
+            'Authorization': `Bearer ${adminToken}`
+          };
+
+          // Fetch all devices
+          const devRes = await fetch(`${apiBaseUrl}/api/devices`, { headers });
+          if (devRes.ok) {
+            const data = await devRes.json();
+            setDevices(data);
+          } else if (devRes.status === 401 || devRes.status === 403) {
+            addLog('API', 'warn', `Device list requires authentication. Please click 'Instant Dev Login'.`);
+          }
+
+          // Fetch pending devices
+          const pendRes = await fetch(`${apiBaseUrl}/api/devices/pending`, { headers });
+          if (pendRes.ok) {
+            const pending = await pendRes.json();
+            setPendingDevices(pending);
+          }
+        } catch (err) {
+          addLog('API', 'error', `Failed to query devices: ${err.message}`);
+        } finally {
+          setLoadingDevices(false);
+        }
+      }, [apiBaseUrl, adminToken, addLog]);
+
+      // Instant Dev Admin Login
+      const handleQuickDevLogin = async () => {
+        try {
+          addLog('AUTH', 'info', 'Requesting Dev Admin token from /api/auth/dev-token...');
+          const res = await fetch(`${apiBaseUrl}/api/auth/dev-token`, { method: 'POST' });
+          if (res.ok) {
+            const data = await res.json();
+            setAdminToken(data.accessToken);
+            addLog('AUTH', 'success', `Dev Admin Token acquired! Roles: [${data.roles?.join(', ')}]`);
+          } else {
+            const txt = await res.text();
+            addLog('AUTH', 'error', `Dev token request failed (${res.status}): ${txt}`);
+          }
+        } catch (err) {
+          addLog('AUTH', 'error', `Dev token request exception: ${err.message}`);
+        }
+      };
+
+      // Initial ping on load
+      useEffect(() => {
+        pingBackend();
+      }, []);
+
+      // Auto poll devices every 5 seconds if API is connected
+      useEffect(() => {
+        if (!apiConnected) return;
+        fetchDevices();
+        const timer = setInterval(fetchDevices, 5000);
+        return () => clearInterval(timer);
+      }, [apiConnected, fetchDevices]);
+
+      // Admin Login Action
+      const handleLogin = async (e) => {
+        e?.preventDefault();
+        try {
+          addLog('AUTH', 'info', `Authenticating as '${authUsername}'...`);
+          const res = await fetch(`${apiBaseUrl}/api/auth/login`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username: authUsername, password: authPassword })
+          });
+
+          if (res.ok) {
+            const data = await res.json();
+            setAdminToken(data.accessToken);
+            addLog('AUTH', 'success', `Successfully authenticated! Roles: [${data.roles?.join(', ')}]`);
+            fetchDevices();
+          } else {
+            const err = await res.json().catch(() => ({ message: 'Invalid credentials' }));
+            addLog('AUTH', 'error', `Login failed: ${err.message || res.statusText}`);
+          }
+        } catch (err) {
+          addLog('AUTH', 'error', `Login error: ${err.message}`);
+        }
+      };
+
+      // Device Approval Action
+      const handleApproveDevice = async (deviceId, deviceCode) => {
+        try {
+          addLog('ACTION', 'info', `Submitting approval for ${deviceCode}...`);
+          const headers = { 'Content-Type': 'application/json' };
+          if (adminToken) headers['Authorization'] = `Bearer ${adminToken}`;
+
+          const res = await fetch(`${apiBaseUrl}/api/devices/${deviceId}/approve`, {
+            method: 'POST',
+            headers
+          });
+
+          if (res.ok) {
+            addLog('ACTION', 'success', `Device ${deviceCode} APPROVED!`);
+            fetchDevices();
+          } else {
+            const text = await res.text();
+            addLog('ACTION', 'error', `Approval failed (${res.status}): ${text}`);
+          }
+        } catch (err) {
+          addLog('ACTION', 'error', `Approval exception: ${err.message}`);
+        }
+      };
+
+      // Device Rejection Action
+      const handleRejectDevice = async (deviceId, deviceCode) => {
+        try {
+          addLog('ACTION', 'info', `Submitting rejection for ${deviceCode}...`);
+          const headers = { 'Content-Type': 'application/json' };
+          if (adminToken) headers['Authorization'] = `Bearer ${adminToken}`;
+
+          const res = await fetch(`${apiBaseUrl}/api/devices/${deviceId}/reject`, {
+            method: 'POST',
+            headers
+          });
+
+          if (res.ok) {
+            addLog('ACTION', 'warn', `Device ${deviceCode} REJECTED.`);
+            fetchDevices();
+          } else {
+            const text = await res.text();
+            addLog('ACTION', 'error', `Rejection failed (${res.status}): ${text}`);
+          }
+        } catch (err) {
+          addLog('ACTION', 'error', `Rejection exception: ${err.message}`);
+        }
+      };
+
+      // Device Revocation Action (Option A)
+      const handleRevokeDevice = async (deviceId, deviceCode) => {
+        if (!confirm(`Are you sure you want to REVOKE station ${deviceCode}? The PC agent will immediately disconnect and wipe active credentials.`)) return;
+        try {
+          addLog('ACTION', 'warn', `Submitting revocation for ${deviceCode}...`);
+          const headers = { 'Content-Type': 'application/json' };
+          if (adminToken) headers['Authorization'] = `Bearer ${adminToken}`;
+
+          const res = await fetch(`${apiBaseUrl}/api/devices/${deviceId}/revoke`, {
+            method: 'POST',
+            headers
+          });
+
+          if (res.ok) {
+            addLog('ACTION', 'warn', `Device ${deviceCode} REVOKED! Remote agent instructed to halt.`);
+            fetchDevices();
+          } else {
+            const text = await res.text();
+            addLog('ACTION', 'error', `Revocation failed (${res.status}): ${text}`);
+          }
+        } catch (err) {
+          addLog('ACTION', 'error', `Revocation exception: ${err.message}`);
+        }
+      };
+
+      // Device Re-authorization Action (Option A: In-Place Zero-Touch Recovery)
+      const handleReauthorizeDevice = async (deviceId, deviceCode) => {
+        try {
+          addLog('ACTION', 'info', `Submitting re-authorization for ${deviceCode}...`);
+          const headers = { 'Content-Type': 'application/json' };
+          if (adminToken) headers['Authorization'] = `Bearer ${adminToken}`;
+
+          const res = await fetch(`${apiBaseUrl}/api/devices/${deviceId}/reauthorize`, {
+            method: 'POST',
+            headers
+          });
+
+          if (res.ok) {
+            addLog('ACTION', 'success', `Device ${deviceCode} RE-AUTHORIZED! Client agent will auto-reconnect on next cycle.`);
+            fetchDevices();
+          } else {
+            const text = await res.text();
+            addLog('ACTION', 'error', `Re-authorization failed (${res.status}): ${text}`);
+          }
+        } catch (err) {
+          addLog('ACTION', 'error', `Re-authorization exception: ${err.message}`);
+        }
+      };
+
+      // --- SIMULATOR ACTIONS ---
+      const handleSimulateRegister = async () => {
+        const randId = Math.random().toString(36).substring(2, 6).toUpperCase();
+        const devCode = `SIM-PC-${randId}`;
+        const devName = `Simulated-Rig-${randId}`;
+        const fingerprint = 'sim_hash_' + Math.random().toString(36).substring(2, 12);
+
+        const payload = {
+          deviceCode: devCode,
+          displayName: devName,
+          hostname: devName,
+          hardwareFingerprintHash: fingerprint,
+          agentVersion: '1.0.0-sim'
+        };
+
+        try {
+          addLog('SIMULATOR', 'info', `Registering virtual agent ${devCode}...`);
+          const res = await fetch(`${apiBaseUrl}/api/devices/register`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+
+          if (res.ok) {
+            const data = await res.json();
+            setSimulatedDevice({ ...payload, id: data.id, registrationStatus: 'PENDING' });
+            addLog('SIMULATOR', 'success', `Virtual agent registered! Id: ${data.id}. Status: PENDING`);
+            fetchDevices();
+          } else {
+            const txt = await res.text();
+            addLog('SIMULATOR', 'error', `Simulator register error: ${txt}`);
+          }
+        } catch (err) {
+          addLog('SIMULATOR', 'error', `Simulator register failed: ${err.message}`);
+        }
+      };
+
+      const handleSimulateAuth = async () => {
+        if (!simulatedDevice) return;
+        try {
+          addLog('SIMULATOR', 'info', `Requesting authentication for ${simulatedDevice.deviceCode}...`);
+          const res = await fetch(`${apiBaseUrl}/api/devices/auth`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              deviceCode: simulatedDevice.deviceCode,
+              hardwareFingerprintHash: simulatedDevice.hardwareFingerprintHash
+            })
+          });
+
+          if (res.ok) {
+            const data = await res.json();
+            setSimulatedToken(data.accessToken);
+            setSimulatedDevice(prev => ({ ...prev, registrationStatus: 'APPROVED' }));
+            addLog('SIMULATOR', 'success', `Received Device JWT! Valid until ${new Date(data.expiresAt).toLocaleTimeString()}`);
+          } else {
+            const txt = await res.text();
+            addLog('SIMULATOR', 'warn', `Auth response (${res.status}): ${txt}`);
+          }
+        } catch (err) {
+          addLog('SIMULATOR', 'error', `Auth exception: ${err.message}`);
+        }
+      };
+
+      const handleToggleSimulatedHeartbeats = async () => {
+        if (simHeartbeatActive) {
+          // Stop
+          if (simConnectionRef.current) {
+            await simConnectionRef.current.stop();
+            simConnectionRef.current = null;
+          }
+          setSimHeartbeatActive(false);
+          addLog('SIMULATOR', 'warn', 'Stopped virtual agent SignalR heartbeat dispatcher.');
+          return;
+        }
+
+        if (!simulatedToken) {
+          alert('Simulated agent must authenticate and acquire a token first!');
+          return;
+        }
+
+        try {
+          addLog('SIMULATOR', 'info', 'Establishing SignalR WSS connection to /hubs/agent...');
+          
+          const hubUrl = `${apiBaseUrl.replace('http://', 'http://').replace('https://', 'https://')}/hubs/agent`;
+          const conn = new signalR.HubConnectionBuilder()
+            .withUrl(hubUrl, {
+              accessTokenFactory: () => simulatedToken,
+              transport: signalR.HttpTransportType.WebSockets,
+              skipNegotiation: false
+            })
+            .withAutomaticReconnect()
+            .build();
+
+          conn.on('HeartbeatAck', (ack) => {
+            addLog('WSS', 'success', `Server ACK received for Heartbeat #${ack.sequenceNumber}`, ack);
+          });
+
+          conn.onclose(() => {
+            addLog('WSS', 'warn', 'SignalR hub connection closed.');
+            setSimHeartbeatActive(false);
+          });
+
+          await conn.start();
+          simConnectionRef.current = conn;
+          setSimHeartbeatActive(true);
+          addLog('WSS', 'success', `Connected to backend AgentHub via WebSockets!`);
+
+          // Send immediate first heartbeat
+          sendSimulatedHeartbeat(conn);
+        } catch (err) {
+          addLog('WSS', 'error', `SignalR connection error: ${err.message}`);
+        }
+      };
+
+      const sendSimulatedHeartbeat = async (activeConn = simConnectionRef.current) => {
+        if (!activeConn || !simulatedDevice) return;
+        const curSeq = simSeq;
+        setSimSeq(s => s + 1);
+
+        const cpu = (Math.random() * 8 + 2).toFixed(1);
+        const mem = (Math.random() * 20 + 38).toFixed(1);
+
+        const payload = {
+          messageId: Math.random().toString(36).substring(2, 10),
+          version: '1.0',
+          timestampUtc: new Date().toISOString(),
+          deviceId: simulatedDevice.id,
+          sequenceNumber: curSeq,
+          agentVersion: '1.0.0-sim',
+          upTimeSeconds: 120.5,
+          cpuPercent: parseFloat(cpu),
+          memoryUsageMb: parseFloat(mem)
+        };
+
+        try {
+          addLog('SIMULATOR', 'info', `Dispatching Heartbeat #${curSeq} (CPU: ${cpu}%, RAM: ${mem}MB)...`);
+          await activeConn.invoke('SendHeartbeat', payload);
+        } catch (err) {
+          addLog('SIMULATOR', 'error', `Failed to dispatch heartbeat: ${err.message}`);
+        }
+      };
+
+      // Periodic simulator dispatcher when active
+      useEffect(() => {
+        if (!simHeartbeatActive) return;
+        const interval = setInterval(() => {
+          sendSimulatedHeartbeat();
+        }, 8000);
+        return () => clearInterval(interval);
+      }, [simHeartbeatActive, simSeq, simulatedDevice]);
+
+      return (
+        <div className="flex flex-col min-h-screen">
+          {/* Top Navigation Bar */}
+          <header className="glass sticky top-0 z-50 px-6 py-3 border-b border-slate-800">
+            <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-cyan-400 to-blue-600 flex items-center justify-center shadow-lg shadow-cyan-500/20 font-bold text-slate-950 text-xl tracking-wider">
+                  GC
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h1 className="font-bold text-lg text-slate-100 tracking-wide">GamingCafe Management</h1>
+                    <span className="text-xs px-2 py-0.5 rounded-full bg-cyan-950 border border-cyan-800 text-cyan-300 font-mono">v1.0 Test Console</span>
+                  </div>
+                  <p className="text-xs text-slate-400">Production-Level Connection & Telemetry Inspector</p>
+                </div>
+              </div>
+
+              {/* Endpoint Selector & Ping Status */}
+              <div className="flex items-center gap-3">
+                <div className="flex items-center rounded-lg bg-slate-900 border border-slate-800 p-1">
+                  <span className="text-xs text-slate-400 px-2 font-mono">API:</span>
+                  <input
+                    type="text"
+                    value={apiBaseUrl}
+                    onChange={(e) => setApiBaseUrl(e.target.value)}
+                    className="bg-transparent text-xs text-slate-200 font-mono focus:outline-none w-48 px-1"
+                    placeholder="http://localhost:5022"
+                  />
+                  <button
+                    onClick={() => pingBackend(apiBaseUrl)}
+                    disabled={checkingApi}
+                    className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-300 transition"
+                  >
+                    {checkingApi ? 'Pinging...' : 'Ping'}
+                  </button>
+                </div>
+
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs font-mono">
+                  <span className={`w-2.5 h-2.5 rounded-full ${apiConnected ? 'bg-emerald-400 shadow-md shadow-emerald-500/50 pulse-online' : 'bg-rose-500'}`}></span>
+                  <span className={apiConnected ? 'text-emerald-400 font-medium' : 'text-rose-400 font-medium'}>
+                    {apiConnected ? 'API Online' : 'Offline'}
+                  </span>
+                </div>
+
+                {!adminToken ? (
+                  <button
+                    onClick={handleQuickDevLogin}
+                    className="px-3 py-1.5 rounded-lg bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 shadow-md shadow-amber-500/20 transition"
+                  >
+                    ⚡ Instant Dev Login
+                  </button>
+                ) : (
+                  <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-950/80 border border-emerald-800 text-emerald-400 text-xs font-mono">
+                    <span>🛡️</span>
+                    <span className="font-semibold">Admin Active</span>
+                    <button onClick={() => setAdminToken('')} className="ml-1 text-slate-400 hover:text-rose-400 text-[10px]" title="Logout">✕</button>
+                  </div>
+                )}
+              </div>
+            </div>
+          </header>
+
+          {/* Main Workspace */}
+          <main className="flex-1 max-w-7xl w-full mx-auto p-6 flex flex-col gap-6">
+            
+            {/* KPI Stat Cards */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+              <div className="glass p-5 rounded-2xl border border-slate-800/80">
+                <div className="text-xs font-semibold text-slate-400 tracking-wider uppercase mb-1">Total Stations</div>
+                <div className="text-3xl font-extrabold text-slate-100 font-mono">{devices.length}</div>
+                <div className="text-xs text-slate-500 mt-2">Registered in database</div>
+              </div>
+
+              <div className="glass p-5 rounded-2xl border border-slate-800/80">
+                <div className="text-xs font-semibold text-slate-400 tracking-wider uppercase mb-1">Approved Stations</div>
+                <div className="text-3xl font-extrabold text-emerald-400 font-mono">
+                  {devices.filter(d => d.registrationStatus === 'APPROVED').length}
+                </div>
+                <div className="text-xs text-emerald-500/80 mt-2">Authorized for cafe play</div>
+              </div>
+
+              <div className="glass p-5 rounded-2xl border border-slate-800/80">
+                <div className="text-xs font-semibold text-slate-400 tracking-wider uppercase mb-1">Pending Approval</div>
+                <div className="text-3xl font-extrabold text-amber-400 font-mono">
+                  {pendingDevices.length}
+                </div>
+                <div className="text-xs text-amber-500/80 mt-2">Requires admin action</div>
+              </div>
+
+              <div className="glass p-5 rounded-2xl border border-slate-800/80">
+                <div className="text-xs font-semibold text-slate-400 tracking-wider uppercase mb-1">Revoked Stations</div>
+                <div className="text-3xl font-extrabold text-rose-400 font-mono">
+                  {devices.filter(d => d.registrationStatus === 'REVOKED').length}
+                </div>
+                <div className="text-xs text-rose-500/80 mt-2">Halted / Decommissioned</div>
+              </div>
+
+              <div className="glass p-5 rounded-2xl border border-slate-800/80">
+                <div className="text-xs font-semibold text-slate-400 tracking-wider uppercase mb-1">Telemetry Events</div>
+                <div className="text-3xl font-extrabold text-cyan-400 font-mono">{liveLogs.length}</div>
+                <div className="text-xs text-cyan-500/80 mt-2">Captured in session feed</div>
+              </div>
+            </div>
+
+            {/* Navigation Tabs */}
+            <div className="flex border-b border-slate-800 gap-2">
+              {[
+                { id: 'stations', label: 'Stations Monitor', count: devices.length },
+                { id: 'pending', label: 'Pending Approvals', count: pendingDevices.length, highlight: pendingDevices.length > 0 },
+                { id: 'telemetry', label: 'Live SignalR Telemetry', count: liveLogs.length },
+                { id: 'simulator', label: 'Virtual Agent Simulator', badge: 'Test Tool' },
+                { id: 'auth', label: 'Admin Authentication', activeIndicator: !!adminToken }
+              ].map(tab => (
+                <button
+                  key={tab.id}
+                  onClick={() => setActiveTab(tab.id)}
+                  className={`px-4 py-2.5 font-medium text-sm rounded-t-xl transition relative flex items-center gap-2 ${
+                    activeTab === tab.id
+                      ? 'bg-slate-900 border-t border-x border-slate-800 text-cyan-400'
+                      : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/40'
+                  }`}
+                >
+                  {tab.label}
+                  {tab.count !== undefined && (
+                    <span className={`text-xs px-2 py-0.5 rounded-full font-mono ${
+                      tab.highlight ? 'bg-amber-500/20 text-amber-300 font-bold' : 'bg-slate-800 text-slate-400'
+                    }`}>
+                      {tab.count}
+                    </span>
+                  )}
+                  {tab.badge && (
+                    <span className="text-[10px] px-1.5 py-0.2 rounded bg-purple-500/20 text-purple-300 font-mono uppercase">
+                      {tab.badge}
+                    </span>
+                  )}
+                  {tab.activeIndicator && (
+                    <span className="w-2 h-2 rounded-full bg-emerald-400" title="Authenticated"></span>
+                  )}
+                </button>
+              ))}
+            </div>
+
+            {/* TAB CONTENT 1: STATIONS MONITOR */}
+            {activeTab === 'stations' && (
+              <div className="flex flex-col gap-4">
+                {!adminToken && (
+                  <div className="glass p-5 rounded-2xl border border-amber-800/40 bg-gradient-to-r from-slate-900 to-amber-950/20 flex items-center justify-between gap-4">
+                    <div>
+                      <div className="font-bold text-amber-300 text-sm flex items-center gap-2">
+                        <span>🔒</span> Authentication Required to View Devices
+                      </div>
+                      <div className="text-xs text-slate-400 mt-1">
+                        The backend requires an admin token with <code>devices.view</code> permission to list and approve stations.
+                      </div>
+                    </div>
+                    <button
+                      onClick={handleQuickDevLogin}
+                      className="px-4 py-2 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-bold rounded-xl text-xs transition shadow-lg shadow-amber-500/20 whitespace-nowrap"
+                    >
+                      ⚡ Instant Dev Login
+                    </button>
+                  </div>
+                )}
+
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h2 className="text-lg font-bold text-slate-100">Gaming PC Stations</h2>
+                    <p className="text-xs text-slate-400">Real-time status of enrolled cafe machines</p>
+                  </div>
+                  <button
+                    onClick={fetchDevices}
+                    disabled={loadingDevices}
+                    className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-xs font-mono text-slate-200 flex items-center gap-2"
+                  >
+                    {loadingDevices ? 'Refreshing...' : 'Refresh List'}
+                  </button>
+                </div>
+
+                {devices.length === 0 ? (
+                  <div className="glass p-12 rounded-2xl text-center border border-slate-800/80 flex flex-col items-center">
+                    <div className="w-12 h-12 rounded-full bg-slate-800 flex items-center justify-center text-slate-500 mb-3 text-xl">
+                      🖥️
+                    </div>
+                    <div className="text-slate-300 font-medium">No stations registered yet</div>
+                    <p className="text-slate-500 text-xs mt-1 max-w-md">
+                      Start the Windows Client Agent service, or use the Virtual Agent Simulator tab to register a test gaming PC.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="glass rounded-2xl border border-slate-800/80 overflow-hidden">
+                    <table className="w-full text-left text-sm">
+                      <thead className="bg-slate-900/80 text-xs text-slate-400 uppercase tracking-wider font-mono border-b border-slate-800">
+                        <tr>
+                          <th className="py-3.5 px-4">Station / Hostname</th>
+                          <th className="py-3.5 px-4">Device Code</th>
+                          <th className="py-3.5 px-4">Status</th>
+                          <th className="py-3.5 px-4">Power</th>
+                          <th className="py-3.5 px-4">IP Address</th>
+                          <th className="py-3.5 px-4">Last Telemetry</th>
+                          <th className="py-3.5 px-4 text-right">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800/60 font-mono text-xs">
+                        {devices.map(dev => {
+                          const isApproved = dev.registrationStatus === 'APPROVED';
+                          const isPending = dev.registrationStatus === 'PENDING';
+                          const isRevoked = dev.registrationStatus === 'REVOKED';
+                          const status = dev.status;
+
+                          return (
+                            <tr key={dev.id} className="hover:bg-slate-900/50 transition">
+                              <td className="py-3.5 px-4">
+                                <div className="font-semibold text-slate-200 font-sans text-sm">{dev.displayName || dev.deviceCode}</div>
+                                <div className="text-slate-500 text-xs">{dev.hostname || 'Unknown host'} (v{dev.agentVersion || '1.0'})</div>
+                              </td>
+                              <td className="py-3.5 px-4 text-cyan-400 font-bold">{dev.deviceCode}</td>
+                              <td className="py-3.5 px-4">
+                                {isApproved ? (
+                                  <span className="px-2.5 py-1 rounded-full bg-emerald-950 text-emerald-400 border border-emerald-800 text-[11px] font-semibold flex items-center gap-1.5 w-max">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span> APPROVED
+                                  </span>
+                                ) : isPending ? (
+                                  <span className="px-2.5 py-1 rounded-full bg-amber-950 text-amber-400 border border-amber-800 text-[11px] font-semibold flex items-center gap-1.5 w-max">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping"></span> PENDING
+                                  </span>
+                                ) : isRevoked ? (
+                                  <span className="px-2.5 py-1 rounded-full bg-rose-950 text-rose-400 border border-rose-800 text-[11px] font-semibold flex items-center gap-1.5 w-max">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-rose-400"></span> REVOKED
+                                  </span>
+                                ) : (
+                                  <span className="px-2.5 py-1 rounded-full bg-slate-800 text-slate-300 border border-slate-700 text-[11px] font-semibold w-max">
+                                    {dev.registrationStatus}
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-3.5 px-4">
+                                <span className={`font-semibold ${isRevoked ? 'text-rose-400' : 'text-slate-300'}`}>
+                                  {isRevoked ? 'REVOKED' : (status?.reportedPowerState || 'UNKNOWN')}
+                                </span>
+                              </td>
+                              <td className="py-3.5 px-4 text-slate-400">
+                                {status?.lastIpAddress || 'No IP logged'}
+                              </td>
+                              <td className="py-3.5 px-4 text-slate-400">
+                                {status?.lastSeenAt ? new Date(status.lastSeenAt).toLocaleTimeString() : 'Never'}
+                              </td>
+                              <td className="py-3.5 px-4 text-right">
+                                {isPending ? (
+                                  <div className="flex items-center justify-end gap-1.5">
+                                    <button
+                                      onClick={() => handleApproveDevice(dev.id, dev.deviceCode)}
+                                      className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded font-sans font-medium text-xs transition shadow-sm shadow-emerald-600/30"
+                                    >
+                                      Approve
+                                    </button>
+                                    <button
+                                      onClick={() => handleRejectDevice(dev.id, dev.deviceCode)}
+                                      className="px-2 py-1 bg-slate-800 hover:bg-rose-950 hover:text-rose-400 text-slate-400 rounded font-sans text-xs transition"
+                                    >
+                                      Reject
+                                    </button>
+                                  </div>
+                                ) : isApproved ? (
+                                  <button
+                                    onClick={() => handleRevokeDevice(dev.id, dev.deviceCode)}
+                                    className="px-2.5 py-1 bg-rose-950/80 hover:bg-rose-900 border border-rose-800 text-rose-300 hover:text-rose-100 rounded font-sans font-medium text-xs transition"
+                                    title="Revoke device authorization (Option A)"
+                                  >
+                                    Revoke
+                                  </button>
+                                ) : (
+                                  <button
+                                    onClick={() => handleReauthorizeDevice(dev.id, dev.deviceCode)}
+                                    className="px-2.5 py-1 bg-cyan-600 hover:bg-cyan-500 text-white rounded font-sans font-medium text-xs transition shadow-sm shadow-cyan-600/30 flex items-center gap-1 ml-auto"
+                                    title="Re-authorize station (Option A: In-place recovery)"
+                                  >
+                                    <span>⚡</span> Re-Authorize
+                                  </button>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* TAB CONTENT 2: PENDING APPROVALS */}
+            {activeTab === 'pending' && (
+              <div className="flex flex-col gap-4">
+                <div>
+                  <h2 className="text-lg font-bold text-slate-100">Pending Device Approvals</h2>
+                  <p className="text-xs text-slate-400">Newly registered gaming PCs awaiting administrator authorization</p>
+                </div>
+
+                {pendingDevices.length === 0 ? (
+                  <div className="glass p-12 rounded-2xl text-center border border-slate-800/80 flex flex-col items-center">
+                    <div className="w-12 h-12 rounded-full bg-emerald-950/50 border border-emerald-800/50 flex items-center justify-center text-emerald-400 mb-3 text-xl">
+                      ✓
+                    </div>
+                    <div className="text-slate-200 font-medium">All caught up!</div>
+                    <p className="text-slate-500 text-xs mt-1">There are no devices waiting for authorization right now.</p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {pendingDevices.map(dev => (
+                      <div key={dev.id} className="glass p-5 rounded-2xl border border-amber-800/40 bg-gradient-to-br from-slate-900/90 to-amber-950/10 flex flex-col justify-between gap-4">
+                        <div className="flex justify-between items-start">
+                          <div>
+                            <div className="text-xs font-mono text-amber-400 font-semibold mb-1">NEW REGISTRATION REQUEST</div>
+                            <h3 className="text-lg font-bold text-slate-100">{dev.displayName || dev.deviceCode}</h3>
+                            <div className="text-xs font-mono text-cyan-400 mt-0.5">{dev.deviceCode}</div>
+                          </div>
+                          <span className="px-2 py-1 rounded bg-amber-900/40 border border-amber-700/50 text-amber-300 font-mono text-xs">
+                            AWAITING APPROVAL
+                          </span>
+                        </div>
+
+                        <div className="text-xs font-mono bg-slate-950/60 p-3 rounded-xl border border-slate-800 space-y-1">
+                          <div className="flex justify-between text-slate-400">
+                            <span>Hostname:</span>
+                            <span className="text-slate-200">{dev.hostname || 'N/A'}</span>
+                          </div>
+                          <div className="flex justify-between text-slate-400">
+                            <span>Fingerprint Hash:</span>
+                            <span className="text-slate-300 truncate max-w-[200px]" title={dev.hardwareFingerprintHash}>
+                              {dev.hardwareFingerprintHash ? dev.hardwareFingerprintHash.substring(0, 16) + '...' : 'None'}
+                            </span>
+                          </div>
+                          <div className="flex justify-between text-slate-400">
+                            <span>Agent Version:</span>
+                            <span className="text-slate-200">{dev.agentVersion || 'v1.0'}</span>
+                          </div>
+                          <div className="flex justify-between text-slate-400">
+                            <span>Requested:</span>
+                            <span className="text-slate-200">{new Date(dev.createdAt).toLocaleString()}</span>
+                          </div>
+                        </div>
+
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => handleApproveDevice(dev.id, dev.deviceCode)}
+                            className="flex-1 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 font-semibold text-xs text-white shadow-lg shadow-emerald-600/20 transition"
+                          >
+                            Approve Device
+                          </button>
+                          <button
+                            onClick={() => handleRejectDevice(dev.id, dev.deviceCode)}
+                            className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-rose-950 hover:text-rose-400 text-slate-300 font-medium text-xs transition border border-slate-700"
+                          >
+                            Reject
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* TAB CONTENT 3: LIVE SIGNALR TELEMETRY */}
+            {activeTab === 'telemetry' && (
+              <div className="flex flex-col gap-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h2 className="text-lg font-bold text-slate-100">Live Telemetry & Activity Feed</h2>
+                    <p className="text-xs text-slate-400">Real-time WebSocket events, heartbeats, and API dispatches</p>
+                  </div>
+                  <button
+                    onClick={() => setLiveLogs([])}
+                    className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-xs font-mono text-slate-300"
+                  >
+                    Clear Logs
+                  </button>
+                </div>
+
+                <div className="glass rounded-2xl border border-slate-800 p-4 font-mono text-xs max-h-[500px] overflow-y-auto custom-scrollbar flex flex-col gap-1.5 bg-slate-950/80">
+                  {liveLogs.length === 0 ? (
+                    <div className="text-slate-600 text-center py-12">No activity logged yet. Perform an action or start the simulator to see events.</div>
+                  ) : (
+                    liveLogs.map(log => {
+                      const badgeColors = {
+                        info: 'bg-blue-950 text-blue-300 border-blue-800',
+                        success: 'bg-emerald-950 text-emerald-300 border-emerald-800',
+                        warn: 'bg-amber-950 text-amber-300 border-amber-800',
+                        error: 'bg-rose-950 text-rose-300 border-rose-800',
+                      }[log.type] || 'bg-slate-800 text-slate-300';
+
+                      return (
+                        <div key={log.id} className="flex items-start gap-2.5 py-1 px-2 rounded hover:bg-slate-900/60 transition">
+                          <span className="text-slate-500 whitespace-nowrap">[{log.time}]</span>
+                          <span className={`px-1.5 py-0.2 rounded border text-[10px] font-bold ${badgeColors}`}>
+                            {log.source}
+                          </span>
+                          <span className="text-slate-200 flex-1">{log.message}</span>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* TAB CONTENT 4: VIRTUAL AGENT SIMULATOR */}
+            {activeTab === 'simulator' && (
+              <div className="flex flex-col gap-5">
+                <div>
+                  <h2 className="text-lg font-bold text-slate-100">Virtual Client Agent Simulator</h2>
+                  <p className="text-xs text-slate-400">Test the entire backend registration, approval, token claim, and SignalR heartbeat cycle without launching a separate executable.</p>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  {/* Step 1: Registration */}
+                  <div className="glass p-5 rounded-2xl border border-slate-800 flex flex-col justify-between gap-4">
+                    <div>
+                      <div className="text-xs font-mono font-bold text-cyan-400 mb-1">STAGE 1</div>
+                      <h3 className="font-bold text-sm text-slate-200">Device Self-Registration</h3>
+                      <p className="text-xs text-slate-400 mt-1">Simulates the agent starting up on a gaming PC and calling POST /api/devices/register.</p>
+                    </div>
+
+                    <div className="text-xs font-mono bg-slate-950 p-3 rounded-xl border border-slate-800/80">
+                      <div>Code: <span className="text-cyan-300">{simulatedDevice?.deviceCode || 'None'}</span></div>
+                      <div>Status: <span className="text-amber-400 font-bold">{simulatedDevice?.registrationStatus || 'Unregistered'}</span></div>
+                    </div>
+
+                    <button
+                      onClick={handleSimulateRegister}
+                      className="w-full py-2.5 rounded-xl bg-cyan-600 hover:bg-cyan-500 font-semibold text-xs text-slate-950 transition"
+                    >
+                      1. Register Virtual PC
+                    </button>
+                  </div>
+
+                  {/* Step 2: Authentication Token Claim */}
+                  <div className="glass p-5 rounded-2xl border border-slate-800 flex flex-col justify-between gap-4">
+                    <div>
+                      <div className="text-xs font-mono font-bold text-purple-400 mb-1">STAGE 2</div>
+                      <h3 className="font-bold text-sm text-slate-200">Claim Device JWT</h3>
+                      <p className="text-xs text-slate-400 mt-1">Once approved by admin, calls POST /api/devices/auth to obtain the encrypted device JWT.</p>
+                    </div>
+
+                    <div className="text-xs font-mono bg-slate-950 p-3 rounded-xl border border-slate-800/80 truncate">
+                      <div>JWT: <span className="text-purple-300">{simulatedToken ? `${simulatedToken.substring(0, 18)}...` : 'Not acquired'}</span></div>
+                      <div>DPAPI State: <span className="text-slate-400">{simulatedToken ? 'Simulated Stored' : 'Empty'}</span></div>
+                    </div>
+
+                    <button
+                      onClick={handleSimulateAuth}
+                      disabled={!simulatedDevice}
+                      className="w-full py-2.5 rounded-xl bg-purple-600 hover:bg-purple-500 disabled:opacity-50 font-semibold text-xs text-white transition"
+                    >
+                      2. Claim Auth Token
+                    </button>
+                  </div>
+
+                  {/* Step 3: SignalR WSS Connection & Heartbeats */}
+                  <div className="glass p-5 rounded-2xl border border-slate-800 flex flex-col justify-between gap-4">
+                    <div>
+                      <div className="text-xs font-mono font-bold text-emerald-400 mb-1">STAGE 3</div>
+                      <h3 className="font-bold text-sm text-slate-200">SignalR WSS Telemetry</h3>
+                      <p className="text-xs text-slate-400 mt-1">Opens WebSocket channel to /hubs/agent and streams periodic heartbeats with telemetry.</p>
+                    </div>
+
+                    <div className="text-xs font-mono bg-slate-950 p-3 rounded-xl border border-slate-800/80">
+                      <div>WSS Channel: <span className={simHeartbeatActive ? 'text-emerald-400 font-bold' : 'text-slate-500'}>{simHeartbeatActive ? 'STREAMING ACTIVE' : 'Disconnected'}</span></div>
+                      <div>Sequence: <span className="text-slate-300">#{simSeq}</span></div>
+                    </div>
+
+                    <button
+                      onClick={handleToggleSimulatedHeartbeats}
+                      disabled={!simulatedToken}
+                      className={`w-full py-2.5 rounded-xl font-semibold text-xs transition ${
+                        simHeartbeatActive
+                          ? 'bg-rose-600 hover:bg-rose-500 text-white'
+                          : 'bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white'
+                      }`}
+                    >
+                      {simHeartbeatActive ? 'Stop Heartbeats' : '3. Start SignalR Stream'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* TAB CONTENT 5: ADMIN AUTHENTICATION */}
+            {activeTab === 'auth' && (
+              <div className="max-w-xl mx-auto w-full glass p-6 rounded-2xl border border-slate-800 flex flex-col gap-4">
+                <div>
+                  <h2 className="text-lg font-bold text-slate-100">Admin Authorization</h2>
+                  <p className="text-xs text-slate-400">Manage your staff or super admin credentials for device approvals</p>
+                </div>
+
+                <form onSubmit={handleLogin} className="flex flex-col gap-3 font-mono text-xs">
+                  <div>
+                    <label className="text-slate-400 block mb-1">Admin Username</label>
+                    <input
+                      type="text"
+                      value={authUsername}
+                      onChange={(e) => setAuthUsername(e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-800 rounded-lg p-2.5 text-slate-200 focus:outline-none focus:border-cyan-500 font-sans text-sm"
+                      placeholder="Username"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-slate-400 block mb-1">Password</label>
+                    <input
+                      type="password"
+                      value={authPassword}
+                      onChange={(e) => setAuthPassword(e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-800 rounded-lg p-2.5 text-slate-200 focus:outline-none focus:border-cyan-500 font-sans text-sm"
+                      placeholder="Password"
+                    />
+                  </div>
+
+                  <button
+                    type="submit"
+                    className="w-full py-2.5 bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold rounded-xl transition mt-2 font-sans text-sm"
+                  >
+                    Log In as Administrator
+                  </button>
+                </form>
+
+                <div className="relative flex py-2 items-center">
+                  <div className="flex-grow border-t border-slate-800"></div>
+                  <span className="flex-shrink mx-4 text-slate-500 text-[10px] uppercase font-mono">Or Manual Bearer Token</span>
+                  <div className="flex-grow border-t border-slate-800"></div>
+                </div>
+
+                <div className="font-mono text-xs">
+                  <label className="text-slate-400 block mb-1">Active Bearer Token</label>
+                  <textarea
+                    rows={3}
+                    value={adminToken}
+                    onChange={(e) => setAdminToken(e.target.value)}
+                    placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg p-2 text-slate-300 font-mono text-xs focus:outline-none focus:border-cyan-500 resize-none"
+                  />
+                  <div className="flex justify-between items-center mt-2">
+                    <span className="text-[11px] text-slate-500">Stored in browser local storage</span>
+                    {adminToken && (
+                      <button
+                        onClick={() => setAdminToken('')}
+                        className="text-rose-400 hover:text-rose-300 text-xs font-medium"
+                      >
+                        Clear Token
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+          </main>
+
+          {/* Footer */}
+          <footer className="border-t border-slate-900 px-6 py-4 text-center text-xs text-slate-600 font-mono">
+            Gaming Cafe Management System (GCMS) • SignalR WebSocket Secure & .NET 10 Pipeline Verified
+          </footer>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>

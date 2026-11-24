@@ -142,6 +142,10 @@ public sealed class SignalRConnectionManager : ISignalRConnectionManager
         {
             targetUrl = "https://" + targetUrl[6..];
         }
+        else if (targetUrl.StartsWith("ws://", StringComparison.OrdinalIgnoreCase))
+        {
+            targetUrl = "http://" + targetUrl[5..];
+        }
 
         var builder = new HubConnectionBuilder()
             .WithUrl(targetUrl, options =>

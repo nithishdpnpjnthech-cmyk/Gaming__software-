@@ -73,17 +73,28 @@ public sealed class ClientAgentWorker : BackgroundService
             // 4. Perform Backend REST Device Registration if not already registered
             await PerformDeviceRegistrationAsync(stoppingToken).ConfigureAwait(false);
 
-            // 5. Connect to SignalR Backend Hub if enabled
-            if (_configService.CurrentConfiguration.Backend.EnableSignalR)
+            // 5. Check if device is approved and authenticate
+            if (_enrollmentService.CurrentState != EnrollmentState.Authenticated)
+            {
+                await CheckApprovalAndAuthenticateAsync(stoppingToken).ConfigureAwait(false);
+            }
+
+            // 6. Connect to SignalR Backend Hub if enabled AND authenticated
+            if (_configService.CurrentConfiguration.Backend.EnableSignalR &&
+                _enrollmentService.CurrentState == EnrollmentState.Authenticated)
             {
                 await ConnectWithRetryLoopAsync(stoppingToken).ConfigureAwait(false);
+            }
+            else if (_enrollmentService.CurrentState != EnrollmentState.Authenticated)
+            {
+                _logger.LogInformation("SignalR connection deferred: Device registration is awaiting administrator approval. Polling for approval...");
             }
             else
             {
                 _logger.LogInformation("SignalR duplex channel paused: Backend SignalR Hub is not deployed. Agent operating in standalone REST registration and local telemetry mode.");
             }
 
-            // 6. Main execution loop
+            // 7. Main execution loop
             while (!stoppingToken.IsCancellationRequested)
             {
                 try
@@ -96,10 +107,13 @@ public sealed class ClientAgentWorker : BackgroundService
                     {
                         await PerformConnectedActionsAsync(stoppingToken).ConfigureAwait(false);
                     }
-                    else if (_enrollmentService.CurrentState == EnrollmentState.PendingApproval)
+                    else if (_enrollmentService.CurrentState != EnrollmentState.Authenticated)
                     {
-                        _logger.LogDebug("Device {DeviceId} (Code: {Code}) is awaiting administrator approval in backend dashboard.",
-                            identity.DeviceId, identity.DeviceCode);
+                        await CheckApprovalAndAuthenticateAsync(stoppingToken).ConfigureAwait(false);
+                    }
+                    else if (_configService.CurrentConfiguration.Backend.EnableSignalR)
+                    {
+                        await ConnectWithRetryLoopAsync(stoppingToken).ConfigureAwait(false);
                     }
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -146,7 +160,12 @@ public sealed class ClientAgentWorker : BackgroundService
 
         _messageHandler.RegisterHandler<DeviceRevocationMessage>("DeviceRevocation", async msg =>
         {
+            _logger.LogCritical("Received remote revocation directive from backend. Inactivating credentials and disconnecting.");
             await _enrollmentService.HandleRevocationMessageAsync(msg).ConfigureAwait(false);
+            if (_connectionManager.IsConnected)
+            {
+                await _connectionManager.StopAsync(CancellationToken.None).ConfigureAwait(false);
+            }
         });
 
         _messageHandler.RegisterHandler<DeviceConfigurationMessage>("DeviceConfiguration", msg =>
@@ -337,6 +356,67 @@ public sealed class ClientAgentWorker : BackgroundService
                     return;
                 }
             }
+        }
+    }
+
+    private async Task CheckApprovalAndAuthenticateAsync(CancellationToken stoppingToken)
+    {
+        var identity = _identityService.CurrentIdentity;
+        var deviceCode = string.IsNullOrWhiteSpace(identity.DeviceCode)
+            ? "PC-" + identity.DeviceId.ToString("N")[..8].ToUpperInvariant()
+            : identity.DeviceCode;
+
+        var request = new DeviceAuthRequestDto
+        {
+            DeviceCode = deviceCode,
+            HardwareFingerprintHash = identity.HardwareIdentifier
+        };
+
+        try
+        {
+            _logger.LogDebug("Checking approval status and requesting authentication token for Device {DeviceCode}...", deviceCode);
+            var result = await _backendApiClient.AuthenticateDeviceAsync(request, stoppingToken).ConfigureAwait(false);
+
+            if (result.Status == DeviceAuthResultStatus.Success && result.Data != null)
+            {
+                _logger.LogInformation("Device {DeviceCode} is APPROVED! Received authentication token (valid until {ExpiresAt}).",
+                    deviceCode, result.Data.ExpiresAt);
+
+                // Save encrypted via DPAPI and transition state to Authenticated
+                await _enrollmentService.HandleAuthenticationMessageAsync(new DeviceAuthenticationMessage
+                {
+                    DeviceId = result.Data.DeviceId,
+                    AccessToken = result.Data.AccessToken,
+                    TokenExpiresAtUtc = result.Data.ExpiresAt
+                }).ConfigureAwait(false);
+
+                identity.RegistrationStatus = "APPROVED";
+                identity.BackendDeviceId = result.Data.DeviceId;
+                identity.LastUpdatedAtUtc = DateTimeOffset.UtcNow;
+                _identityStore.SaveIdentity(identity);
+
+                // Connect to SignalR if enabled and not already connected
+                if (_configService.CurrentConfiguration.Backend.EnableSignalR && !_connectionManager.IsConnected)
+                {
+                    await ConnectWithRetryLoopAsync(stoppingToken).ConfigureAwait(false);
+                }
+            }
+            else if (result.Status == DeviceAuthResultStatus.PendingApproval)
+            {
+                _logger.LogDebug("Device {DeviceCode} is awaiting administrator approval in backend.", deviceCode);
+            }
+            else if (result.Status == DeviceAuthResultStatus.Denied)
+            {
+                _logger.LogWarning("Device authentication was DENIED for {DeviceCode}: {Error}", deviceCode, result.ErrorMessage);
+            }
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            // Graceful shutdown
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Exception during periodic device authentication check for {DeviceCode}.", deviceCode);
         }
     }
 }

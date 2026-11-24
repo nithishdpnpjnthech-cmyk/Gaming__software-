@@ -3,6 +3,7 @@ using System.Security.Claims;
 using Microsoft.EntityFrameworkCore;
 using GamingCafe.Api.Data;
 using GamingCafe.Api.Services;
+using GamingCafe.Api.Hubs;
 using Microsoft.AspNetCore.Identity;
 using GamingCafe.Api.Models;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -74,6 +75,20 @@ builder.Services
             NameClaimType = ClaimTypes.Name,
             RoleClaimType = ClaimTypes.Role
         };
+
+        options.Events = new JwtBearerEvents
+        {
+            OnMessageReceived = context =>
+            {
+                var accessToken = context.Request.Query["access_token"];
+                var path = context.HttpContext.Request.Path;
+                if (!string.IsNullOrEmpty(accessToken) && path.StartsWithSegments("/hubs/agent"))
+                {
+                    context.Token = accessToken;
+                }
+                return Task.CompletedTask;
+            }
+        };
     });
 
 // Register permission-based authorization policies
@@ -96,8 +111,21 @@ builder.Services.AddAuthorization(options =>
               .RequireClaim("permission", "devices.send_command"));
 });
 
-// Register controllers
+// Register CORS for frontend integration
+builder.Services.AddCors(options =>
+{
+    options.AddDefaultPolicy(policy =>
+    {
+        policy.SetIsOriginAllowed(_ => true)
+              .AllowAnyHeader()
+              .AllowAnyMethod()
+              .AllowCredentials();
+    });
+});
+
+// Register controllers and SignalR
 builder.Services.AddControllers();
+builder.Services.AddSignalR();
 builder.Services.AddOpenApi();
 
 var app = builder.Build();
@@ -131,12 +159,19 @@ if (args.Contains("--bootstrap-super-admin"))
 // Run RBAC seeder only in Development
 if (app.Environment.IsDevelopment())
 {
-    using var scope = app.Services.CreateScope();
+    try
+    {
+        using var scope = app.Services.CreateScope();
 
-    var dbContext = scope.ServiceProvider
-        .GetRequiredService<GamingCafeDbContext>();
+        var dbContext = scope.ServiceProvider
+            .GetRequiredService<GamingCafeDbContext>();
 
-    await RbacSeeder.SeedAsync(dbContext);
+        await RbacSeeder.SeedAsync(dbContext);
+    }
+    catch (Exception ex)
+    {
+        app.Logger.LogWarning("PostgreSQL database connection failed on startup: {Message}. The API is running, but database-dependent endpoints require PostgreSQL to be started with the schema applied.", ex.Message);
+    }
 }
 
 // Configure HTTP request pipeline
@@ -147,10 +182,13 @@ if (app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 
+app.UseCors();
+
 // Authentication must run before authorization
 app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();
+app.MapHub<AgentHub>("/hubs/agent");
 
 app.Run();

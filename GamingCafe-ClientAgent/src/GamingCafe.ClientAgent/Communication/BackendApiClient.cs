@@ -130,4 +130,124 @@ public sealed class BackendApiClient : IBackendApiClient
             };
         }
     }
+
+    public async Task<DeviceAuthResult> AuthenticateDeviceAsync(
+        DeviceAuthRequestDto request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var config = _configService.CurrentConfiguration;
+        var baseUri = config.Backend.ApiBaseUrl.TrimEnd('/');
+        var targetEndpoint = $"{baseUri}/api/devices/auth";
+
+        _logger.LogDebug("Requesting device authentication token from '{Endpoint}' (DeviceCode: '{DeviceCode}')...",
+            targetEndpoint, request.DeviceCode);
+
+        try
+        {
+            var jsonPayload = JsonSerializer.Serialize(request, JsonOptions);
+            using var content = new StringContent(jsonPayload, Encoding.UTF8, "application/json");
+
+            using var httpRequest = new HttpRequestMessage(HttpMethod.Post, targetEndpoint)
+            {
+                Content = content
+            };
+            httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+            using var response = await _httpClient.SendAsync(httpRequest, cancellationToken).ConfigureAwait(false);
+            var statusCode = (int)response.StatusCode;
+            var responseBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+
+            if (response.StatusCode == HttpStatusCode.OK)
+            {
+                var responseDto = JsonSerializer.Deserialize<DeviceAuthResponseDto>(responseBody, JsonOptions);
+                _logger.LogInformation("Device {DeviceCode} successfully authenticated by backend! Token expires at {ExpiresAt}",
+                    request.DeviceCode, responseDto?.ExpiresAt);
+
+                return new DeviceAuthResult
+                {
+                    Status = DeviceAuthResultStatus.Success,
+                    StatusCode = statusCode,
+                    Data = responseDto,
+                    ErrorMessage = null
+                };
+            }
+
+            if (response.StatusCode == HttpStatusCode.Forbidden)
+            {
+                _logger.LogDebug("Device authentication forbidden (HTTP 403): {Body}", responseBody);
+
+                var isPending = responseBody.Contains("awaiting administrator approval", StringComparison.OrdinalIgnoreCase);
+                return new DeviceAuthResult
+                {
+                    Status = isPending ? DeviceAuthResultStatus.PendingApproval : DeviceAuthResultStatus.Denied,
+                    StatusCode = statusCode,
+                    ErrorMessage = responseBody
+                };
+            }
+
+            if (response.StatusCode == HttpStatusCode.Unauthorized)
+            {
+                _logger.LogWarning("Device authentication unauthorized (HTTP 401): {Body}", responseBody);
+
+                return new DeviceAuthResult
+                {
+                    Status = DeviceAuthResultStatus.Denied,
+                    StatusCode = statusCode,
+                    ErrorMessage = responseBody
+                };
+            }
+
+            if (response.StatusCode == HttpStatusCode.NotFound)
+            {
+                _logger.LogWarning("Device authentication not found (HTTP 404): {Body}", responseBody);
+
+                return new DeviceAuthResult
+                {
+                    Status = DeviceAuthResultStatus.NotFound,
+                    StatusCode = statusCode,
+                    ErrorMessage = responseBody
+                };
+            }
+
+            if (response.StatusCode == HttpStatusCode.BadRequest)
+            {
+                _logger.LogError("Device authentication validation error (HTTP 400): {Body}", responseBody);
+
+                return new DeviceAuthResult
+                {
+                    Status = DeviceAuthResultStatus.ValidationError,
+                    StatusCode = statusCode,
+                    ErrorMessage = responseBody
+                };
+            }
+
+            _logger.LogWarning("Unexpected response from backend device auth endpoint: HTTP {StatusCode} {Body}",
+                statusCode, responseBody);
+
+            return new DeviceAuthResult
+            {
+                Status = statusCode >= 500 ? DeviceAuthResultStatus.ServerError : DeviceAuthResultStatus.UnexpectedResponse,
+                StatusCode = statusCode,
+                ErrorMessage = responseBody
+            };
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogInformation("Device authentication request cancelled.");
+            throw;
+        }
+        catch (Exception ex)
+        {
+            var (category, reason) = ConnectionErrorClassifier.Classify(ex);
+            _logger.LogWarning("Failed to reach backend device auth endpoint [{Category}]: {Reason}", category, reason);
+
+            return new DeviceAuthResult
+            {
+                Status = DeviceAuthResultStatus.NetworkFailure,
+                ErrorMessage = $"{category}: {reason}"
+            };
+        }
+    }
 }

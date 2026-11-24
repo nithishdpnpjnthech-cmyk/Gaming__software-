@@ -56,9 +56,60 @@ public class DeviceRegistrationResult
     public int? StatusCode { get; set; }
 }
 
+public class DeviceAuthRequestDto
+{
+    [JsonPropertyName("deviceCode")]
+    public string DeviceCode { get; set; } = string.Empty;
+
+    [JsonPropertyName("hardwareFingerprintHash")]
+    public string HardwareFingerprintHash { get; set; } = string.Empty;
+}
+
+public class DeviceAuthResponseDto
+{
+    [JsonPropertyName("accessToken")]
+    public string AccessToken { get; set; } = string.Empty;
+
+    [JsonPropertyName("expiresAt")]
+    public DateTime ExpiresAt { get; set; }
+
+    [JsonPropertyName("deviceId")]
+    public Guid DeviceId { get; set; }
+
+    [JsonPropertyName("deviceCode")]
+    public string DeviceCode { get; set; } = string.Empty;
+
+    [JsonPropertyName("displayName")]
+    public string DisplayName { get; set; } = string.Empty;
+}
+
+public enum DeviceAuthResultStatus
+{
+    Success,         // 200 OK
+    PendingApproval, // 403 Forbidden (Awaiting approval)
+    Denied,          // 401 Unauthorized (Fingerprint mismatch) or 403 (Rejected/Revoked)
+    NotFound,        // 404 Not Found
+    ValidationError, // 400 Bad Request
+    NetworkFailure,  // Sockets, DNS, TLS, Timeout
+    ServerError,     // 5xx
+    UnexpectedResponse
+}
+
+public class DeviceAuthResult
+{
+    public DeviceAuthResultStatus Status { get; set; }
+    public DeviceAuthResponseDto? Data { get; set; }
+    public string? ErrorMessage { get; set; }
+    public int? StatusCode { get; set; }
+}
+
 public interface IBackendApiClient
 {
     Task<DeviceRegistrationResult> RegisterDeviceAsync(
         DeviceRegistrationRequestDto request, 
+        CancellationToken cancellationToken = default);
+
+    Task<DeviceAuthResult> AuthenticateDeviceAsync(
+        DeviceAuthRequestDto request,
         CancellationToken cancellationToken = default);
 }
