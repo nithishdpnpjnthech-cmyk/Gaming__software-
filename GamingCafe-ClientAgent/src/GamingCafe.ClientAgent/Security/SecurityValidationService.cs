@@ -61,7 +61,16 @@ public sealed class SecurityValidationService : ISecurityValidationService
             return false;
         }
 
-        // Pinned thumbprint check if configured
+        // 1. Certificate Expiry Validation (Universal check across production and development)
+        var now = DateTime.UtcNow;
+        if (now < certificate.NotBefore.ToUniversalTime() || now > certificate.NotAfter.ToUniversalTime())
+        {
+            _logger.LogError("TLS verification failed: Certificate is expired or not yet valid. NotBefore: {NotBefore:u}, NotAfter: {NotAfter:u}, CurrentUtc: {Now:u}.",
+                certificate.NotBefore, certificate.NotAfter, now);
+            return false;
+        }
+
+        // 2. Pinned thumbprint check if explicitly configured
         if (!string.IsNullOrWhiteSpace(config.ExpectedCertificateThumbprint))
         {
             var serverThumbprint = certificate.Thumbprint;
@@ -79,17 +88,46 @@ public sealed class SecurityValidationService : ISecurityValidationService
             return true;
         }
 
-        // Otherwise standard system validation check
+        // 3. Permissive validation check - strictly isolated and permitted ONLY in Development environment
         if (!config.ValidateCertificates)
         {
-            if (_configService.CurrentConfiguration.Security.RejectNonWss)
+            var env = Environment.GetEnvironmentVariable("DOTNET_ENVIRONMENT") 
+                      ?? Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT")
+                      ?? _configService.CurrentConfiguration.Agent.Environment;
+            var isDevelopment = string.Equals(env, "Development", StringComparison.OrdinalIgnoreCase);
+
+            if (!isDevelopment)
             {
-                _logger.LogError("Security policy violation: Certificate validation bypass is prohibited under active security hardening.");
+                _logger.LogError("Security policy violation: Certificate validation bypass is strictly prohibited in Production environment.");
                 return false;
             }
 
-            _logger.LogWarning("TLS certificate validation is DISABLED by development configuration.");
+            _logger.LogWarning("TLS certificate validation is BYPASSED by explicit Development configuration. TLS transport encryption remains active.");
             return true;
+        }
+
+        // 4. Hostname Validation
+        if ((sslPolicyErrors & SslPolicyErrors.RemoteCertificateNameMismatch) != 0)
+        {
+            _logger.LogError("TLS verification failed: Hostname mismatch between target server and certificate Subject/SAN.");
+            return false;
+        }
+
+        // 5. Certificate Chain and Authority Validation
+        if ((sslPolicyErrors & SslPolicyErrors.RemoteCertificateChainErrors) != 0)
+        {
+            if (chain != null)
+            {
+                foreach (var status in chain.ChainStatus)
+                {
+                    _logger.LogError("TLS chain error: {StatusFlag} - {StatusInfo}", status.Status, status.StatusInformation?.Trim());
+                }
+            }
+            else
+            {
+                _logger.LogError("TLS verification failed: Remote certificate chain errors detected but no chain was provided.");
+            }
+            return false;
         }
 
         if (sslPolicyErrors == SslPolicyErrors.None)

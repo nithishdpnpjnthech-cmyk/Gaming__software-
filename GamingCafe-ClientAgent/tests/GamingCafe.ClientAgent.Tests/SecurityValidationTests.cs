@@ -1,3 +1,6 @@
+using System.Net.Security;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using GamingCafe.ClientAgent.Configuration;
 using GamingCafe.ClientAgent.Security;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -43,5 +46,170 @@ public class SecurityValidationTests
 
         Assert.DoesNotContain(token, sanitized);
         Assert.Contains("token:eyJh...", sanitized);
+    }
+
+    [Fact]
+    public void ValidateServerCertificate_WhenNullCertificate_ReturnsFalse()
+    {
+        var config = new AgentConfiguration();
+        var configService = new MockConfigurationService(config);
+        var validator = new SecurityValidationService(configService, NullLogger<SecurityValidationService>.Instance);
+
+        var result = validator.ValidateServerCertificate(null, null, null, SslPolicyErrors.None);
+        Assert.False(result);
+    }
+
+    [Fact]
+    public void ValidateServerCertificate_WhenExpiredCertificate_ReturnsFalse()
+    {
+        var config = new AgentConfiguration();
+        var configService = new MockConfigurationService(config);
+        var validator = new SecurityValidationService(configService, NullLogger<SecurityValidationService>.Instance);
+
+        using var expiredCert = CreateCertificate("expired.gamingcafe.local", 
+            DateTimeOffset.UtcNow.AddDays(-30), 
+            DateTimeOffset.UtcNow.AddDays(-1));
+
+        var result = validator.ValidateServerCertificate(null, expiredCert, null, SslPolicyErrors.None);
+        Assert.False(result);
+    }
+
+    [Fact]
+    public void ValidateServerCertificate_WhenNotYetValidCertificate_ReturnsFalse()
+    {
+        var config = new AgentConfiguration();
+        var configService = new MockConfigurationService(config);
+        var validator = new SecurityValidationService(configService, NullLogger<SecurityValidationService>.Instance);
+
+        using var futureCert = CreateCertificate("future.gamingcafe.local", 
+            DateTimeOffset.UtcNow.AddDays(10), 
+            DateTimeOffset.UtcNow.AddDays(40));
+
+        var result = validator.ValidateServerCertificate(null, futureCert, null, SslPolicyErrors.None);
+        Assert.False(result);
+    }
+
+    [Fact]
+    public void ValidateServerCertificate_WhenHostnameMismatch_ReturnsFalse()
+    {
+        var config = new AgentConfiguration();
+        var configService = new MockConfigurationService(config);
+        var validator = new SecurityValidationService(configService, NullLogger<SecurityValidationService>.Instance);
+
+        using var cert = CreateCertificate("backend.gamingcafe.local", 
+            DateTimeOffset.UtcNow.AddDays(-1), 
+            DateTimeOffset.UtcNow.AddDays(30));
+
+        var result = validator.ValidateServerCertificate(null, cert, null, SslPolicyErrors.RemoteCertificateNameMismatch);
+        Assert.False(result);
+    }
+
+    [Fact]
+    public void ValidateServerCertificate_WhenChainErrors_ReturnsFalse()
+    {
+        var config = new AgentConfiguration();
+        var configService = new MockConfigurationService(config);
+        var validator = new SecurityValidationService(configService, NullLogger<SecurityValidationService>.Instance);
+
+        using var cert = CreateCertificate("backend.gamingcafe.local", 
+            DateTimeOffset.UtcNow.AddDays(-1), 
+            DateTimeOffset.UtcNow.AddDays(30));
+
+        var result = validator.ValidateServerCertificate(null, cert, null, SslPolicyErrors.RemoteCertificateChainErrors);
+        Assert.False(result);
+    }
+
+    [Fact]
+    public void ValidateServerCertificate_WhenThumbprintMismatch_ReturnsFalse()
+    {
+        var config = new AgentConfiguration();
+        config.Backend.ExpectedCertificateThumbprint = "00112233445566778899AABBCCDDEEFF00112233";
+        var configService = new MockConfigurationService(config);
+        var validator = new SecurityValidationService(configService, NullLogger<SecurityValidationService>.Instance);
+
+        using var cert = CreateCertificate("backend.gamingcafe.local", 
+            DateTimeOffset.UtcNow.AddDays(-1), 
+            DateTimeOffset.UtcNow.AddDays(30));
+
+        var result = validator.ValidateServerCertificate(null, cert, null, SslPolicyErrors.None);
+        Assert.False(result);
+    }
+
+    [Fact]
+    public void ValidateServerCertificate_WhenThumbprintMatches_ReturnsTrue()
+    {
+        using var cert = CreateCertificate("backend.gamingcafe.local", 
+            DateTimeOffset.UtcNow.AddDays(-1), 
+            DateTimeOffset.UtcNow.AddDays(30));
+
+        var config = new AgentConfiguration();
+        config.Backend.ExpectedCertificateThumbprint = cert.Thumbprint;
+        var configService = new MockConfigurationService(config);
+        var validator = new SecurityValidationService(configService, NullLogger<SecurityValidationService>.Instance);
+
+        var result = validator.ValidateServerCertificate(null, cert, null, SslPolicyErrors.RemoteCertificateChainErrors);
+        Assert.True(result);
+    }
+
+    [Fact]
+    public void ValidateServerCertificate_WhenValidCertificateAndNoPolicyErrors_ReturnsTrue()
+    {
+        var config = new AgentConfiguration();
+        var configService = new MockConfigurationService(config);
+        var validator = new SecurityValidationService(configService, NullLogger<SecurityValidationService>.Instance);
+
+        using var cert = CreateCertificate("backend.gamingcafe.local", 
+            DateTimeOffset.UtcNow.AddDays(-1), 
+            DateTimeOffset.UtcNow.AddDays(30));
+
+        var result = validator.ValidateServerCertificate(null, cert, null, SslPolicyErrors.None);
+        Assert.True(result);
+    }
+
+    [Fact]
+    public void ValidateServerCertificate_InDevelopment_WhenValidateCertificatesFalse_AllowsSelfSignedOrUntrustedCert()
+    {
+        var config = new AgentConfiguration();
+        config.Agent.Environment = "Development";
+        config.Backend.ValidateCertificates = false;
+        config.Backend.RequireWss = true;
+        config.Security.RejectNonWss = true;
+
+        var configService = new MockConfigurationService(config);
+        var validator = new SecurityValidationService(configService, NullLogger<SecurityValidationService>.Instance);
+
+        using var cert = CreateCertificate("localhost", 
+            DateTimeOffset.UtcNow.AddDays(-1), 
+            DateTimeOffset.UtcNow.AddDays(30));
+
+        // In Development with ValidateCertificates=false, RemoteCertificateChainErrors (e.g. self-signed) is bypassed
+        var result = validator.ValidateServerCertificate(null, cert, null, SslPolicyErrors.RemoteCertificateChainErrors);
+        Assert.True(result);
+    }
+
+    [Fact]
+    public void ValidateServerCertificate_InProduction_WhenValidateCertificatesFalse_RejectsBypass()
+    {
+        var config = new AgentConfiguration();
+        config.Agent.Environment = "Production";
+        config.Backend.ValidateCertificates = false;
+
+        var configService = new MockConfigurationService(config);
+        var validator = new SecurityValidationService(configService, NullLogger<SecurityValidationService>.Instance);
+
+        using var cert = CreateCertificate("backend.gamingcafe.local", 
+            DateTimeOffset.UtcNow.AddDays(-1), 
+            DateTimeOffset.UtcNow.AddDays(30));
+
+        // In Production, ValidateCertificates=false must be rejected by security policy
+        var result = validator.ValidateServerCertificate(null, cert, null, SslPolicyErrors.None);
+        Assert.False(result);
+    }
+
+    private static X509Certificate2 CreateCertificate(string subject, DateTimeOffset notBefore, DateTimeOffset notAfter)
+    {
+        using var rsa = RSA.Create(2048);
+        var req = new CertificateRequest($"CN={subject}", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        return req.CreateSelfSigned(notBefore, notAfter);
     }
 }

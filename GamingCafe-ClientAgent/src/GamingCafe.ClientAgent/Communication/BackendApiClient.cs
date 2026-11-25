@@ -130,4 +130,90 @@ public sealed class BackendApiClient : IBackendApiClient
             };
         }
     }
+
+    public async Task<DeviceVerificationResult> VerifyDeviceExistsAsync(
+        Guid backendDeviceId,
+        CancellationToken cancellationToken = default)
+    {
+        if (backendDeviceId == Guid.Empty)
+        {
+            return new DeviceVerificationResult
+            {
+                Status = DeviceVerificationStatus.NotFound,
+                ErrorMessage = "BackendDeviceId is empty GUID."
+            };
+        }
+
+        var config = _configService.CurrentConfiguration;
+        var baseUri = config.Backend.ApiBaseUrl.TrimEnd('/');
+        var targetEndpoint = $"{baseUri}/api/devices/{backendDeviceId}";
+
+        _logger.LogInformation("Verifying device existence with backend at '{Endpoint}'...", targetEndpoint);
+
+        try
+        {
+            using var httpRequest = new HttpRequestMessage(HttpMethod.Get, targetEndpoint);
+            httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+            using var response = await _httpClient.SendAsync(httpRequest, cancellationToken).ConfigureAwait(false);
+            var statusCode = (int)response.StatusCode;
+
+            if (response.StatusCode == HttpStatusCode.OK)
+            {
+                _logger.LogInformation("Backend verified: Device record '{BackendDeviceId}' exists in backend database.", backendDeviceId);
+                return new DeviceVerificationResult
+                {
+                    Status = DeviceVerificationStatus.Confirmed,
+                    StatusCode = statusCode
+                };
+            }
+
+            if (response.StatusCode == HttpStatusCode.NotFound)
+            {
+                _logger.LogWarning("Backend reported HTTP 404 Not Found: Device record '{BackendDeviceId}' does NOT exist in backend database.", backendDeviceId);
+                return new DeviceVerificationResult
+                {
+                    Status = DeviceVerificationStatus.NotFound,
+                    StatusCode = statusCode,
+                    ErrorMessage = "Device not found on backend."
+                };
+            }
+
+            if (response.StatusCode == HttpStatusCode.Unauthorized || response.StatusCode == HttpStatusCode.Forbidden)
+            {
+                // Endpoint requires Authorization policy (devices.view)
+                // 401/403 proves the backend is reachable and functioning, but does NOT indicate the device is missing.
+                _logger.LogDebug("Verification endpoint requires authorization (HTTP {StatusCode}). Backend is alive; cannot confirm or deny record existence via unauthenticated GET.", statusCode);
+                return new DeviceVerificationResult
+                {
+                    Status = DeviceVerificationStatus.Unauthorized,
+                    StatusCode = statusCode,
+                    ErrorMessage = $"Authorization required: HTTP {statusCode}"
+                };
+            }
+
+            _logger.LogWarning("Verification check returned status HTTP {StatusCode}", statusCode);
+            return new DeviceVerificationResult
+            {
+                Status = statusCode >= 500 ? DeviceVerificationStatus.ServerError : DeviceVerificationStatus.ServerError,
+                StatusCode = statusCode,
+                ErrorMessage = $"HTTP {statusCode}"
+            };
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            var (category, reason) = ConnectionErrorClassifier.Classify(ex);
+            _logger.LogWarning("Could not verify device existence at backend [{Category}]: {Reason}", category, reason);
+
+            return new DeviceVerificationResult
+            {
+                Status = DeviceVerificationStatus.NetworkFailure,
+                ErrorMessage = $"{category}: {reason}"
+            };
+        }
+    }
 }

@@ -170,6 +170,71 @@ public class BackendApiClientTests
         });
     }
 
+    [Fact]
+    public async Task VerifyDeviceExistsAsync_When200OK_ReturnsConfirmed()
+    {
+        var testId = Guid.NewGuid();
+        var handler = new MockHttpMessageHandler(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{\"id\":\"" + testId + "\",\"registrationStatus\":\"PENDING\"}", Encoding.UTF8, "application/json")
+        });
+
+        var httpClient = new HttpClient(handler);
+        var client = new BackendApiClient(httpClient, _configService, _securityValidation, NullLogger<BackendApiClient>.Instance);
+
+        var result = await client.VerifyDeviceExistsAsync(testId);
+
+        Assert.Equal(DeviceVerificationStatus.Confirmed, result.Status);
+        Assert.Equal(200, result.StatusCode);
+        Assert.Equal(HttpMethod.Get, handler.LastRequest?.Method);
+        Assert.Equal($"https://backend.gamingcafe.local:7267/api/devices/{testId}", handler.LastRequest?.RequestUri?.ToString());
+    }
+
+    [Fact]
+    public async Task VerifyDeviceExistsAsync_When404NotFound_ReturnsNotFound()
+    {
+        var testId = Guid.NewGuid();
+        var handler = new MockHttpMessageHandler(new HttpResponseMessage(HttpStatusCode.NotFound));
+
+        var httpClient = new HttpClient(handler);
+        var client = new BackendApiClient(httpClient, _configService, _securityValidation, NullLogger<BackendApiClient>.Instance);
+
+        var result = await client.VerifyDeviceExistsAsync(testId);
+
+        Assert.Equal(DeviceVerificationStatus.NotFound, result.Status);
+        Assert.Equal(404, result.StatusCode);
+    }
+
+    [Fact]
+    public async Task VerifyDeviceExistsAsync_When401Unauthorized_ReturnsUnauthorized()
+    {
+        var testId = Guid.NewGuid();
+        var handler = new MockHttpMessageHandler(new HttpResponseMessage(HttpStatusCode.Unauthorized));
+
+        var httpClient = new HttpClient(handler);
+        var client = new BackendApiClient(httpClient, _configService, _securityValidation, NullLogger<BackendApiClient>.Instance);
+
+        var result = await client.VerifyDeviceExistsAsync(testId);
+
+        Assert.Equal(DeviceVerificationStatus.Unauthorized, result.Status);
+        Assert.Equal(401, result.StatusCode);
+    }
+
+    [Fact]
+    public async Task VerifyDeviceExistsAsync_WhenNetworkException_ReturnsNetworkFailure()
+    {
+        var testId = Guid.NewGuid();
+        var handler = new MockHttpMessageHandler(new System.Net.Sockets.SocketException((int)System.Net.Sockets.SocketError.ConnectionRefused));
+
+        var httpClient = new HttpClient(handler);
+        var client = new BackendApiClient(httpClient, _configService, _securityValidation, NullLogger<BackendApiClient>.Instance);
+
+        var result = await client.VerifyDeviceExistsAsync(testId);
+
+        Assert.Equal(DeviceVerificationStatus.NetworkFailure, result.Status);
+        Assert.NotNull(result.ErrorMessage);
+    }
+
     private sealed class MockHttpMessageHandler : HttpMessageHandler
     {
         private readonly HttpResponseMessage? _response;

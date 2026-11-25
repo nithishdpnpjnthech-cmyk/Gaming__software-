@@ -1,0 +1,6 @@
+﻿Gaming Cafe Client Agent
+Version: 1.0.0
+Architecture: Windows x64 (Standalone Single-File Executable)
+Runtime: .NET 10.0 (Self-Contained - No local .NET runtime required)
+Build Configuration: Release
+Package Date: 2026-11-25 17:55:19

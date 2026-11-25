@@ -41,16 +41,26 @@ public sealed class SignalRConnectionManager : ISignalRConnectionManager
     }
 
     public bool IsConnected => _hubConnection?.State == HubConnectionState.Connected;
+    public string? ConnectionId => _hubConnection?.ConnectionId;
+    public AgentConnectionStatus Status => _connectionStateManager.CurrentStatus;
+    public event Action<AgentConnectionStatus, string?>? ConnectionStateChanged;
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
         await _connectionLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (_hubConnection != null && _hubConnection.State == HubConnectionState.Connected)
+            if (_hubConnection != null)
             {
-                _logger.LogInformation("SignalR connection is already active.");
-                return;
+                if (_hubConnection.State == HubConnectionState.Connected)
+                {
+                    _logger.LogInformation("SignalR connection is already active.");
+                    return;
+                }
+
+                _logger.LogDebug("Disposing inactive/closed previous HubConnection before re-initializing...");
+                await _hubConnection.DisposeAsync().ConfigureAwait(false);
+                _hubConnection = null;
             }
 
             var config = _configService.CurrentConfiguration;
@@ -59,27 +69,37 @@ public sealed class SignalRConnectionManager : ISignalRConnectionManager
                 throw new InvalidOperationException($"Security validation rejected HubUrl: {error}");
             }
 
-            _logger.LogDebug("Building SignalR connection to '{HubUrl}' with mandatory WebSocket transport...",
-                config.Backend.HubUrl);
+            var hasCredentials = _authService.CurrentCredentials != null;
+            var isTokenValid = _authService.IsAuthenticated;
+            var tokenExpiry = _authService.CurrentCredentials?.TokenExpiresAtUtc;
+
+            _logger.LogInformation(
+                "Initiating SignalR connection to '{HubUrl}'. AuthState: HasCredentials={HasCreds}, IsAuthenticated={IsAuth}, TokenExpiresUtc={TokenExpiry}",
+                config.Backend.HubUrl, hasCredentials, isTokenValid, tokenExpiry?.ToString("o") ?? "N/A");
 
             _hubConnection = BuildHubConnection(config);
             RegisterHubEvents(_hubConnection);
 
             _connectionStateManager.SetStatus(AgentConnectionStatus.Connecting, "Initiating connection");
+            ConnectionStateChanged?.Invoke(AgentConnectionStatus.Connecting, "Initiating connection");
 
             await _hubConnection.StartAsync(cancellationToken).ConfigureAwait(false);
             _connectionStateManager.SetStatus(AgentConnectionStatus.Connected, "Connected to backend hub");
-            _logger.LogInformation("SignalR WebSocket connection established successfully with backend '{HubUrl}'.", config.Backend.HubUrl);
+            ConnectionStateChanged?.Invoke(AgentConnectionStatus.Connected, "Connected to backend hub");
+            _logger.LogInformation("SignalR WebSocket connection established successfully with backend '{HubUrl}'. ConnectionId: {ConnectionId}",
+                config.Backend.HubUrl, _hubConnection.ConnectionId);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             _connectionStateManager.SetStatus(AgentConnectionStatus.Disconnected, "Connection cancelled during shutdown");
+            ConnectionStateChanged?.Invoke(AgentConnectionStatus.Disconnected, "Connection cancelled during shutdown");
             _logger.LogInformation("SignalR connection attempt cancelled during graceful shutdown.");
             throw;
         }
         catch (Exception ex)
         {
             _connectionStateManager.SetStatus(AgentConnectionStatus.Disconnected, ex.Message);
+            ConnectionStateChanged?.Invoke(AgentConnectionStatus.Disconnected, ex.Message);
             _logger.LogDebug(ex, "Detailed failure starting SignalR connection to '{HubUrl}':", _configService.CurrentConfiguration.Backend.HubUrl);
             throw;
         }
@@ -99,6 +119,7 @@ public sealed class SignalRConnectionManager : ISignalRConnectionManager
                 _logger.LogInformation("Stopping SignalR connection...");
                 await _hubConnection.StopAsync(cancellationToken).ConfigureAwait(false);
                 _connectionStateManager.SetStatus(AgentConnectionStatus.Disconnected, "Graceful stop requested");
+                ConnectionStateChanged?.Invoke(AgentConnectionStatus.Disconnected, "Graceful stop requested");
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -149,6 +170,7 @@ public sealed class SignalRConnectionManager : ISignalRConnectionManager
                 // MANDATORY: WebSockets transport strictly enforced. No LongPolling, no SSE fallback.
                 options.Transports = HttpTransportType.WebSockets;
                 options.SkipNegotiation = false;
+                options.CloseTimeout = TimeSpan.FromSeconds(Math.Max(5, config.Backend.ConnectionTimeoutSeconds));
 
                 // Supply JWT bearer token dynamically
                 options.AccessTokenProvider = () => _authService.GetAccessTokenAsync();
@@ -160,6 +182,15 @@ public sealed class SignalRConnectionManager : ISignalRConnectionManager
                     {
                         clientHandler.ServerCertificateCustomValidationCallback =
                             (msg, cert, chain, errors) => _securityValidationService.ValidateServerCertificate(msg, cert, chain, errors);
+                    }
+                    else if (handler is SocketsHttpHandler socketsHandler)
+                    {
+                        socketsHandler.SslOptions.RemoteCertificateValidationCallback =
+                            (sender, cert, chain, errors) =>
+                            {
+                                var cert2 = cert as System.Security.Cryptography.X509Certificates.X509Certificate2;
+                                return _securityValidationService.ValidateServerCertificate(null, cert2, chain, errors);
+                            };
                     }
                     return handler;
                 };
@@ -177,6 +208,9 @@ public sealed class SignalRConnectionManager : ISignalRConnectionManager
             })
             .WithAutomaticReconnect(_reconnectionService);
 
+        builder.WithServerTimeout(TimeSpan.FromSeconds(Math.Max(10, config.Backend.ConnectionTimeoutSeconds)));
+        builder.WithKeepAliveInterval(TimeSpan.FromSeconds(Math.Max(5, config.Backend.HandshakeTimeoutSeconds)));
+
         return builder.Build();
     }
 
@@ -188,6 +222,7 @@ public sealed class SignalRConnectionManager : ISignalRConnectionManager
         {
             _connectionStateManager.SetStatus(AgentConnectionStatus.Reconnecting, error?.Message);
             _connectionStateManager.IncrementReconnectAttempts();
+            ConnectionStateChanged?.Invoke(AgentConnectionStatus.Reconnecting, error?.Message);
 
             var (category, reason) = ConnectionErrorClassifier.Classify(error);
             _logger.LogWarning("SignalR connection lost to '{HubUrl}' [{Category}]: {Reason}. Automatic reconnecting...",
@@ -203,6 +238,8 @@ public sealed class SignalRConnectionManager : ISignalRConnectionManager
         hub.Reconnected += connectionId =>
         {
             _connectionStateManager.SetStatus(AgentConnectionStatus.Connected, "Reconnected successfully");
+            _connectionStateManager.ResetReconnectAttempts();
+            ConnectionStateChanged?.Invoke(AgentConnectionStatus.Connected, "Reconnected successfully");
             _logger.LogInformation("SignalR WebSocket connection restored successfully to '{HubUrl}'. ConnectionId: {ConnectionId}",
                 hubUrl, connectionId);
             return Task.CompletedTask;
@@ -211,6 +248,7 @@ public sealed class SignalRConnectionManager : ISignalRConnectionManager
         hub.Closed += error =>
         {
             _connectionStateManager.SetStatus(AgentConnectionStatus.Disconnected, error?.Message);
+            ConnectionStateChanged?.Invoke(AgentConnectionStatus.Disconnected, error?.Message);
             if (error != null)
             {
                 var (category, reason) = ConnectionErrorClassifier.Classify(error);

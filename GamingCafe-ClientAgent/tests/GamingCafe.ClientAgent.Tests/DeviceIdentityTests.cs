@@ -114,6 +114,40 @@ public class DeviceIdentityTests : IDisposable
         }
     }
 
+    [Fact]
+    public void StoragePathResolver_ResolvesRootedPathDirectly()
+    {
+        var customPath = Path.Combine(Path.GetTempPath(), "CustomDirectDir");
+        var resolved = StoragePathResolver.ResolveStorageDirectory(customPath, NullLogger.Instance);
+        Assert.Equal(Path.GetFullPath(customPath), resolved);
+    }
+
+    [Fact]
+    public void StoragePathResolver_ResolvesCurrentDirectoryWhenFolderExists()
+    {
+        var testSubdir = Path.Combine(Directory.GetCurrentDirectory(), "test-data-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(testSubdir);
+
+        try
+        {
+            var relativeName = Path.GetFileName(testSubdir);
+            var resolved = StoragePathResolver.ResolveStorageDirectory(relativeName, NullLogger.Instance);
+            Assert.Equal(Path.GetFullPath(testSubdir), resolved);
+        }
+        finally
+        {
+            try { Directory.Delete(testSubdir, true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void DeviceIdentityStore_ExposesResolvedPaths()
+    {
+        var store = new DeviceIdentityStore(_mockConfig, NullLogger<DeviceIdentityStore>.Instance);
+        Assert.Equal(Path.GetFullPath(_tempDirectory), store.StorageDirectory);
+        Assert.Equal(Path.Combine(Path.GetFullPath(_tempDirectory), "device-identity.json"), store.IdentityFilePath);
+    }
+
     public void Dispose()
     {
         try

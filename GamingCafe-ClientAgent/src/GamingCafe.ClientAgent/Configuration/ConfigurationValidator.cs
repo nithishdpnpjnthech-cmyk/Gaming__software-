@@ -2,7 +2,7 @@ namespace GamingCafe.ClientAgent.Configuration;
 
 public static class ConfigurationValidator
 {
-    public static (bool IsValid, List<string> Errors) Validate(AgentConfiguration config)
+    public static (bool IsValid, List<string> Errors) Validate(AgentConfiguration config, string? environmentName = null)
     {
         var errors = new List<string>();
 
@@ -10,6 +10,37 @@ public static class ConfigurationValidator
         {
             errors.Add("Configuration cannot be null.");
             return (false, errors);
+        }
+
+        // Determine environment: parameter overrides explicit config, or falls back to system env / Agent.Environment
+        var env = !string.IsNullOrWhiteSpace(environmentName)
+            ? environmentName
+            : Environment.GetEnvironmentVariable("DOTNET_ENVIRONMENT")
+              ?? Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT")
+              ?? config.Agent.Environment;
+        bool isDevelopment = string.Equals(env, "Development", StringComparison.OrdinalIgnoreCase);
+
+        // Server validation (if host/ip is provided)
+        var serverHost = !string.IsNullOrWhiteSpace(config.Server.ServerIp)
+            ? config.Server.ServerIp
+            : config.Server.ServerHost;
+
+        if (!string.IsNullOrWhiteSpace(serverHost))
+        {
+            if (config.Server.ApiPort <= 0 || config.Server.ApiPort > 65535)
+            {
+                errors.Add($"Invalid Server.ApiPort: '{config.Server.ApiPort}'. Must be between 1 and 65535.");
+            }
+
+            if (config.Server.WebSocketPort <= 0 || config.Server.WebSocketPort > 65535)
+            {
+                errors.Add($"Invalid Server.WebSocketPort: '{config.Server.WebSocketPort}'. Must be between 1 and 65535.");
+            }
+
+            if (string.IsNullOrWhiteSpace(config.Server.WebSocketPath))
+            {
+                errors.Add("Server.WebSocketPath cannot be empty.");
+            }
         }
 
         // Backend validation
@@ -54,11 +85,19 @@ public static class ConfigurationValidator
 
                 if (!config.Backend.ValidateCertificates && string.IsNullOrWhiteSpace(config.Backend.ExpectedCertificateThumbprint))
                 {
-                    errors.Add("Insecure configuration: TLS Certificate validation cannot be disabled when security hardening (RejectNonWss/RequireWss) is active.");
+                    if (!isDevelopment)
+                    {
+                        errors.Add("Insecure configuration: TLS Certificate validation cannot be disabled in Production environment.");
+                    }
                 }
             }
             else
             {
+                if (!isDevelopment)
+                {
+                    errors.Add("Insecure configuration: RequireWss must be enabled in Production environment.");
+                }
+
                 if (scheme != "wss" && scheme != "https" && scheme != "ws" && scheme != "http")
                 {
                     errors.Add($"Unsupported HubUrl scheme '{scheme}'.");
@@ -108,10 +147,20 @@ public static class ConfigurationValidator
             errors.Add("BackoffMultiplier must be greater than 1.0.");
         }
 
-        // Identity
-        if (string.IsNullOrWhiteSpace(config.Identity.StorageDirectory))
+        if (config.Reconnection.JitterMaxSeconds < 0)
         {
-            errors.Add("Identity StorageDirectory cannot be empty.");
+            errors.Add("JitterMaxSeconds cannot be negative.");
+        }
+
+        // Logging validation
+        if (config.Logging.File.MaxFileSizeMb < 1 || config.Logging.File.MaxFileSizeMb > 500)
+        {
+            errors.Add("File logging MaxFileSizeMb must be between 1 and 500 MB.");
+        }
+
+        if (config.Logging.File.RetainedFileDays < 1 || config.Logging.File.RetainedFileDays > 365)
+        {
+            errors.Add("File logging RetainedFileDays must be between 1 and 365 days.");
         }
 
         return (errors.Count == 0, errors);

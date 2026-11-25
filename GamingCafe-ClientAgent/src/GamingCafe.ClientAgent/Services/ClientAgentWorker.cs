@@ -22,6 +22,7 @@ public sealed class ClientAgentWorker : BackgroundService
     private readonly IReconnectionService _reconnectionService;
     private readonly IMessageHandler _messageHandler;
     private readonly ILogger<ClientAgentWorker> _logger;
+    private readonly SemaphoreSlim _connectLoopLock = new(1, 1);
 
     public ClientAgentWorker(
         ISignalRConnectionManager connectionManager,
@@ -61,8 +62,23 @@ public sealed class ClientAgentWorker : BackgroundService
         {
             // 1. Initialize local identity
             var identity = _identityService.GetOrCreateIdentity();
-            _logger.LogInformation("Agent initialized for DeviceId: {DeviceId}, Host: {Host}, Version: {Version}",
-                identity.DeviceId, identity.DeviceName, identity.ClientVersion);
+            _logger.LogInformation("Agent initialized from storage '{StoragePath}'. DeviceId: {DeviceId}, BackendDeviceId: {BackendId}, DeviceCode: '{Code}', Status: '{Status}', Host: '{Host}', Version: '{Version}'",
+                _identityStore.IdentityFilePath, identity.DeviceId, identity.BackendDeviceId, identity.DeviceCode, identity.RegistrationStatus, identity.DeviceName, identity.ClientVersion);
+
+            // Optional diagnostic validation against expected DeviceId
+            var expectedDeviceIdEnv = Environment.GetEnvironmentVariable("EXPECTED_DEVICE_ID");
+            if (!string.IsNullOrWhiteSpace(expectedDeviceIdEnv) && Guid.TryParse(expectedDeviceIdEnv, out var expectedGuid))
+            {
+                if (identity.DeviceId == expectedGuid)
+                {
+                    _logger.LogInformation("DIAGNOSTIC CHECK PASSED: Loaded DeviceId matches EXPECTED_DEVICE_ID '{ExpectedId}'.", expectedGuid);
+                }
+                else
+                {
+                    _logger.LogWarning("DIAGNOSTIC CHECK WARNING: Loaded DeviceId '{ActualId}' differs from EXPECTED_DEVICE_ID '{ExpectedId}'! Source File: '{SourceFile}'",
+                        identity.DeviceId, expectedGuid, _identityStore.IdentityFilePath);
+                }
+            }
 
             // 2. Initialize enrollment state
             await _enrollmentService.InitializeStateAsync().ConfigureAwait(false);
@@ -123,6 +139,7 @@ public sealed class ClientAgentWorker : BackgroundService
             {
                 await _connectionManager.StopAsync(CancellationToken.None).ConfigureAwait(false);
             }
+            _connectLoopLock.Dispose();
         }
     }
 
@@ -158,47 +175,68 @@ public sealed class ClientAgentWorker : BackgroundService
 
     private async Task ConnectWithRetryLoopAsync(CancellationToken stoppingToken)
     {
-        var attempt = 0;
-        var hubUrl = _configService.CurrentConfiguration.Backend.HubUrl;
-
-        while (!stoppingToken.IsCancellationRequested)
+        if (!await _connectLoopLock.WaitAsync(0, stoppingToken).ConfigureAwait(false))
         {
-            attempt++;
-            try
+            _logger.LogDebug("Connection retry loop is already actively running. Skipping duplicate concurrent loop.");
+            return;
+        }
+
+        try
+        {
+            var attempt = 0;
+            var hubUrl = _configService.CurrentConfiguration.Backend.HubUrl;
+
+            while (!stoppingToken.IsCancellationRequested)
             {
-                _logger.LogInformation("Attempting to connect to backend via WSS: '{HubUrl}'...", hubUrl);
-                await _connectionManager.StartAsync(stoppingToken).ConfigureAwait(false);
-                _logger.LogInformation("SignalR WebSocket connection established successfully with backend: '{HubUrl}'", hubUrl);
-
-                // Check registration immediately upon connect
-                await PerformDeviceRegistrationAsync(stoppingToken).ConfigureAwait(false);
-                return;
-            }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-            {
-                _logger.LogInformation("Initial connection attempt cancelled due to service shutdown.");
-                return;
-            }
-            catch (Exception ex)
-            {
-                var (category, reason) = ConnectionErrorClassifier.Classify(ex);
-                var delay = _reconnectionService.CalculateNextDelay(attempt);
-
-                _logger.LogWarning("Connection to backend '{HubUrl}' failed [{Category}]: {Reason}. Retrying in {Delay:N1}s (attempt {Attempt})...",
-                    hubUrl, category, reason, delay.TotalSeconds, attempt);
-
-                _logger.LogDebug(ex, "Detailed connection failure exception for '{HubUrl}':", hubUrl);
-
+                attempt++;
                 try
                 {
-                    await Task.Delay(delay, stoppingToken).ConfigureAwait(false);
+                    _logger.LogInformation("Attempting to connect to backend via WSS: '{HubUrl}'...", hubUrl);
+                    await _connectionManager.StartAsync(stoppingToken).ConfigureAwait(false);
+                    _logger.LogInformation("SignalR WebSocket connection established successfully with backend: '{HubUrl}'", hubUrl);
+
+                    // Check registration immediately upon connect
+                    await PerformDeviceRegistrationAsync(stoppingToken).ConfigureAwait(false);
+                    return;
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                 {
-                    _logger.LogInformation("Retry delay cancelled due to service shutdown.");
+                    _logger.LogInformation("Initial connection attempt cancelled due to service shutdown.");
                     return;
                 }
+                catch (Exception ex)
+                {
+                    var (category, reason) = ConnectionErrorClassifier.Classify(ex);
+                    var delay = _reconnectionService.CalculateNextDelay(attempt);
+
+                    if (category == ConnectionFailureCategory.AuthenticationFailure)
+                    {
+                        var currentState = _enrollmentService.CurrentState;
+                        _logger.LogWarning(
+                            "SignalR Hub rejected connection with HTTP 401 Unauthorized. CurrentEnrollmentState={State}. Server requires valid device authentication token before granting WebSocket access.",
+                            currentState);
+                    }
+
+                    _logger.LogWarning("Connection to backend '{HubUrl}' failed [{Category}]: {Reason}. Retrying in {Delay:N1}s (attempt {Attempt})...",
+                        hubUrl, category, reason, delay.TotalSeconds, attempt);
+
+                    _logger.LogDebug(ex, "Detailed connection failure exception for '{HubUrl}':", hubUrl);
+
+                    try
+                    {
+                        await Task.Delay(delay, stoppingToken).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                    {
+                        _logger.LogInformation("Retry delay cancelled due to service shutdown.");
+                        return;
+                    }
+                }
             }
+        }
+        finally
+        {
+            _connectLoopLock.Release();
         }
     }
 
@@ -218,7 +256,11 @@ public sealed class ClientAgentWorker : BackgroundService
 
             case EnrollmentState.Approved:
             case EnrollmentState.Authenticated:
-                await _heartbeatService.SendHeartbeatAsync(stoppingToken).ConfigureAwait(false);
+                var acked = await _heartbeatService.SendHeartbeatAsync(stoppingToken).ConfigureAwait(false);
+                if (!acked)
+                {
+                    _logger.LogWarning("Heartbeat cycle completed without server acknowledgment.");
+                }
                 break;
 
             case EnrollmentState.Rejected:
@@ -235,12 +277,36 @@ public sealed class ClientAgentWorker : BackgroundService
     {
         var identity = _identityService.CurrentIdentity;
 
-        // If already registered with backend and has a confirmed BackendDeviceId, skip initial registration call
+        // Verify existing registration if BackendDeviceId is present
         if (identity.BackendDeviceId.HasValue)
         {
-            _logger.LogInformation("Device {DeviceId} is already registered with backend (Backend DeviceId: {BackendId}, Status: {Status}).",
+            _logger.LogInformation("Device {DeviceId} has existing BackendDeviceId '{BackendId}' (Status: {Status}). Verifying with backend...",
                 identity.DeviceId, identity.BackendDeviceId, identity.RegistrationStatus);
-            return;
+
+            var verifyResult = await _backendApiClient.VerifyDeviceExistsAsync(identity.BackendDeviceId.Value, stoppingToken).ConfigureAwait(false);
+
+            if (verifyResult.Status == DeviceVerificationStatus.NotFound)
+            {
+                // The backend database was wiped or this device was deleted on the server!
+                // Clear the stale BackendDeviceId and safely recover via re-registration workflow.
+                _logger.LogWarning("Existing backend record '{BackendId}' was NOT found on backend (HTTP 404). Device was deleted or backend DB was reset. Clearing stale BackendDeviceId and initiating registration recovery...",
+                    identity.BackendDeviceId.Value);
+
+                identity.BackendDeviceId = null;
+                identity.RegistrationStatus = "UNREGISTERED";
+                identity.LastUpdatedAtUtc = DateTimeOffset.UtcNow;
+                _identityStore.SaveIdentity(identity);
+
+                await _enrollmentService.TransitionToAsync(EnrollmentState.Unregistered, "Stale BackendDeviceId cleared; initiating re-registration.").ConfigureAwait(false);
+            }
+            else
+            {
+                // In Confirmed, Unauthorized (401/403 - auth policy), ServerError, or NetworkFailure:
+                // Do NOT clear registration because of HTTP 401, 403, timeout or server errors.
+                _logger.LogInformation("Existing backend registration check outcome: {Status}. Preserving local identity and registration state.",
+                    verifyResult.Status);
+                return;
+            }
         }
 
         var attempt = 0;

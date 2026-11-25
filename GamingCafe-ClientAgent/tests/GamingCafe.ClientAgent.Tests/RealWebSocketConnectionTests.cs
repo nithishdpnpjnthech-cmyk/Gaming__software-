@@ -108,6 +108,12 @@ public class RealWebSocketConnectionTests : IDisposable
             configService,
             NullLogger<HeartbeatService>.Instance);
 
+        messageHandler.RegisterHandler<HeartbeatAcknowledgment>("HeartbeatAck", msg =>
+        {
+            heartbeatService.HandleAcknowledgment(msg);
+            return Task.CompletedTask;
+        });
+
         // 3. Connect Client to Server over WSS
         await connManager.StartAsync();
         Assert.True(connManager.IsConnected, "Client should be connected to server over WSS.");

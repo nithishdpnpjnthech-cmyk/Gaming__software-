@@ -1,0 +1,14 @@
+{
+  "DeviceId": "46d0b13f-b5f3-4e4a-a415-54067333b27f",
+  "BackendDeviceId": "ce07ed1d-64fc-4b10-9367-7e94412bbe11",
+  "DeviceCode": "PC-46D0B13F",
+  "DisplayName": "ROOPESH",
+  "DeviceName": "ROOPESH",
+  "RegistrationStatus": "PENDING",
+  "HardwareIdentifier": "5dd9f21f39178d7ca0e705df6410a65b3a4d929ed6914d84911123cf2863558a",
+  "MacAddress": "00:15:5D:EC:A7:E6",
+  "OsVersion": "Microsoft Windows 10.0.26300",
+  "ClientVersion": "1.0.0-dev",
+  "FirstEnrolledAtUtc": "2026-11-23T09:45:29.384221+00:00",
+  "LastUpdatedAtUtc": "2026-11-24T10:06:20.0403621+00:00"
+}

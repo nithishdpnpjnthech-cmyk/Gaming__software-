@@ -45,6 +45,7 @@ public sealed class HeartbeatMessage : BaseMessage
     public double UpTimeSeconds { get; set; }
     public double CpuPercent { get; set; }
     public double MemoryUsageMb { get; set; }
+    public AgentConnectionStatus ConnectionStatus { get; set; } = AgentConnectionStatus.Connected;
 }
 
 public sealed class HeartbeatAcknowledgment : BaseMessage

@@ -70,12 +70,13 @@ public static class Program
         // 1. Independent File Logger Options extracted cleanly from raw IConfiguration
         var loggingConfig = builder.Configuration.GetSection("Logging:File");
         var logDir = loggingConfig["LogDirectory"] ?? "logs";
+        var resolvedLogDir = Path.IsPathRooted(logDir) ? logDir : Path.Combine(AppContext.BaseDirectory, logDir);
         var maxMb = int.TryParse(loggingConfig["MaxFileSizeMb"], out var parsedMb) ? parsedMb : 10;
         var retainDays = int.TryParse(loggingConfig["RetainedFileDays"], out var parsedDays) ? parsedDays : 14;
 
         var fileLoggerOptions = new FileLoggerOptions
         {
-            LogDirectory = logDir,
+            LogDirectory = resolvedLogDir,
             MaxFileSizeMb = maxMb,
             RetainedFileDays = retainDays
         };

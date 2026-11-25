@@ -14,16 +14,33 @@ public sealed class DeviceIdentityStore : IDeviceIdentityStore
     public DeviceIdentityStore(IConfigurationService configService, ILogger<DeviceIdentityStore> logger)
     {
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-        _storageDir = Path.GetFullPath(configService.CurrentConfiguration.Identity.StorageDirectory);
+        var rawDir = configService.CurrentConfiguration.Identity.StorageDirectory;
+        _storageDir = StoragePathResolver.ResolveStorageDirectory(rawDir, _logger);
         _filePath = Path.Combine(_storageDir, "device-identity.json");
+
+        _logger.LogInformation(
+            "DeviceIdentityStore initialized. BaseDirectory: '{BaseDir}', CurrentDirectory: '{CurrentDir}', ConfiguredStorageDir: '{ConfiguredDir}', ResolvedStorageDir: '{ResolvedDir}', FilePath: '{FilePath}', FileExists: {Exists}",
+            AppContext.BaseDirectory,
+            Directory.GetCurrentDirectory(),
+            rawDir,
+            _storageDir,
+            _filePath,
+            File.Exists(_filePath));
     }
+
+    public string StorageDirectory => _storageDir;
+    public string IdentityFilePath => _filePath;
 
     public bool IdentityExists() => File.Exists(_filePath);
 
     public DeviceIdentity? LoadIdentity()
     {
+        _logger.LogInformation("Loading device identity from resolved path: '{FilePath}' (Exists: {Exists})",
+            _filePath, File.Exists(_filePath));
+
         if (!File.Exists(_filePath))
         {
+            _logger.LogWarning("No device identity file found at '{FilePath}'. A new persistent identity will be generated.", _filePath);
             return null;
         }
 
@@ -36,6 +53,10 @@ public sealed class DeviceIdentityStore : IDeviceIdentityStore
                 QuarantineCorruptedFile("Identity object was null or contained empty GUID.");
                 return null;
             }
+
+            _logger.LogInformation(
+                "Successfully loaded identity from '{FilePath}'. DeviceId: {DeviceId}, BackendDeviceId: {BackendId}, DeviceCode: '{Code}', Status: '{Status}'",
+                _filePath, identity.DeviceId, identity.BackendDeviceId, identity.DeviceCode, identity.RegistrationStatus);
 
             return identity;
         }

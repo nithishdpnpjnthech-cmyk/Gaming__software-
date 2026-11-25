@@ -19,9 +19,22 @@ public sealed class SecureCredentialStore : ISecureCredentialStore
     {
         _protector = protector ?? throw new ArgumentNullException(nameof(protector));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-        _storageDir = Path.GetFullPath(configService.CurrentConfiguration.Identity.StorageDirectory);
+        var rawDir = configService.CurrentConfiguration.Identity.StorageDirectory;
+        _storageDir = StoragePathResolver.ResolveStorageDirectory(rawDir, _logger);
         _filePath = Path.Combine(_storageDir, "device-credentials.dat");
+
+        _logger.LogInformation(
+            "SecureCredentialStore initialized. BaseDirectory: '{BaseDir}', CurrentDirectory: '{CurrentDir}', ConfiguredStorageDir: '{ConfiguredDir}', ResolvedStorageDir: '{ResolvedDir}', FilePath: '{FilePath}', FileExists: {Exists}",
+            AppContext.BaseDirectory,
+            Directory.GetCurrentDirectory(),
+            rawDir,
+            _storageDir,
+            _filePath,
+            File.Exists(_filePath));
     }
+
+    public string StorageDirectory => _storageDir;
+    public string CredentialFilePath => _filePath;
 
     public bool HasCredentials() => File.Exists(_filePath);
 

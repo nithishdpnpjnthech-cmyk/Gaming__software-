@@ -73,6 +73,62 @@ public class CredentialProtectionTests : IDisposable
         Assert.Null(store.LoadCredentials());
     }
 
+    [Fact]
+    public async Task DeviceAuthenticationService_WhenNoCredentials_GetAccessTokenReturnsNull()
+    {
+        var protector = new DpapiCredentialProtection(_mockConfig, NullLogger<DpapiCredentialProtection>.Instance);
+        var store = new SecureCredentialStore(_mockConfig, protector, NullLogger<SecureCredentialStore>.Instance);
+        var authService = new DeviceAuthenticationService(store, NullLogger<DeviceAuthenticationService>.Instance);
+
+        Assert.False(authService.IsAuthenticated);
+        Assert.Null(authService.CurrentCredentials);
+
+        var token = await authService.GetAccessTokenAsync();
+        Assert.Null(token);
+    }
+
+    [Fact]
+    public async Task DeviceAuthenticationService_WhenTokenExpired_GetAccessTokenReturnsNull()
+    {
+        var protector = new DpapiCredentialProtection(_mockConfig, NullLogger<DpapiCredentialProtection>.Instance);
+        var store = new SecureCredentialStore(_mockConfig, protector, NullLogger<SecureCredentialStore>.Instance);
+        var authService = new DeviceAuthenticationService(store, NullLogger<DeviceAuthenticationService>.Instance);
+
+        var expiredCreds = new DeviceCredentials
+        {
+            DeviceId = Guid.NewGuid(),
+            AccessToken = "expired-token",
+            TokenExpiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(-10),
+            IssuedAtUtc = DateTimeOffset.UtcNow.AddHours(-1)
+        };
+        authService.SetCredentials(expiredCreds);
+
+        Assert.False(authService.IsAuthenticated);
+        var token = await authService.GetAccessTokenAsync();
+        Assert.Null(token);
+    }
+
+    [Fact]
+    public async Task DeviceAuthenticationService_WhenTokenValid_GetAccessTokenReturnsToken()
+    {
+        var protector = new DpapiCredentialProtection(_mockConfig, NullLogger<DpapiCredentialProtection>.Instance);
+        var store = new SecureCredentialStore(_mockConfig, protector, NullLogger<SecureCredentialStore>.Instance);
+        var authService = new DeviceAuthenticationService(store, NullLogger<DeviceAuthenticationService>.Instance);
+
+        var validCreds = new DeviceCredentials
+        {
+            DeviceId = Guid.NewGuid(),
+            AccessToken = "valid-secret-jwt-token",
+            TokenExpiresAtUtc = DateTimeOffset.UtcNow.AddHours(2),
+            IssuedAtUtc = DateTimeOffset.UtcNow
+        };
+        authService.SetCredentials(validCreds);
+
+        Assert.True(authService.IsAuthenticated);
+        var token = await authService.GetAccessTokenAsync();
+        Assert.Equal("valid-secret-jwt-token", token);
+    }
+
     public void Dispose()
     {
         try

@@ -47,15 +47,19 @@ public sealed class DeviceAuthenticationService : IDeviceAuthenticationService
         {
             if (_currentCredentials == null)
             {
+                _logger.LogDebug("AccessTokenProvider invoked: No credentials present (CurrentCredentials == null). Connection will proceed unauthenticated.");
                 return Task.FromResult<string?>(null);
             }
 
             if (_currentCredentials.IsExpired(TimeSpan.FromSeconds(30)))
             {
-                _logger.LogWarning("Current access token is expired or expiring soon.");
+                _logger.LogWarning("AccessTokenProvider invoked: Access token is expired (Expired at: {ExpiresUtc}, Current: {NowUtc}). Connection will proceed without valid token.",
+                    _currentCredentials.TokenExpiresAtUtc, DateTimeOffset.UtcNow);
                 return Task.FromResult<string?>(null);
             }
 
+            _logger.LogDebug("AccessTokenProvider invoked: Valid token available (ExpiresAtUtc: {ExpiresUtc}). Attaching Bearer token to handshake.",
+                _currentCredentials.TokenExpiresAtUtc);
             return Task.FromResult<string?>(_currentCredentials.AccessToken);
         }
     }
