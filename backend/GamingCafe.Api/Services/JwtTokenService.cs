@@ -110,6 +110,7 @@ public class JwtTokenService
         var now = DateTime.UtcNow;
         var expires = now.AddMinutes(15);
         var claims = new[] {
+            new Claim(ClaimTypes.NameIdentifier, $"device:{deviceId:D}"),
             new Claim("token_type", "device"),
             new Claim("device_id", deviceId.ToString()),
             new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())

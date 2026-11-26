@@ -133,6 +133,7 @@ public class DevicesController : ControllerBase
         try
         {
             var device = await _context.Devices
+                .Include(d => d.DeviceStatus)
                 .FirstOrDefaultAsync(d => d.Id == id);
 
             if (device == null)
@@ -146,10 +147,31 @@ public class DevicesController : ControllerBase
                     "Only pending devices can be approved.");
             }
 
+            var now = DateTime.UtcNow;
+
             device.RegistrationStatus = "APPROVED";
             device.ApprovedBy = userId;
-            device.ApprovedAt = DateTime.UtcNow;
-            device.UpdatedAt = DateTime.UtcNow;
+            device.ApprovedAt = now;
+            device.UpdatedAt = now;
+
+            if (device.DeviceStatus != null)
+            {
+                device.DeviceStatus.LastStatusChangeAt = now;
+                device.DeviceStatus.UpdatedAt = now;
+            }
+            else
+            {
+                var deviceStatus = new DeviceStatus
+                {
+                    DeviceId = device.Id,
+                    LastSeenAt = null,
+                    LastIpAddress = null,
+                    ReportedPowerState = null,
+                    LastStatusChangeAt = now,
+                    UpdatedAt = now
+                };
+                _context.DeviceStatuses.Add(deviceStatus);
+            }
 
             _context.AuditLogs.Add(new AuditLog
             {
@@ -163,7 +185,7 @@ public class DevicesController : ControllerBase
     deviceCode = device.DeviceCode,
     deviceId = device.Id
 }),
-                OccurredAt = DateTime.UtcNow
+                OccurredAt = now
             });
 
             await _context.SaveChangesAsync();
