@@ -1,3 +1,4 @@
 <Solution>
+  <Project Path="GamingCafe.Api.Tests/GamingCafe.Api.Tests.csproj" />
   <Project Path="GamingCafe.Api/GamingCafe.Api.csproj" />
 </Solution>

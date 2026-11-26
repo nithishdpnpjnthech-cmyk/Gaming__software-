@@ -105,4 +105,17 @@ public class JwtTokenService
             Permissions = permissionList
         };
     }
+    public DeviceLoginResponse CreateDeviceToken(Guid deviceId)
+    {
+        var now = DateTime.UtcNow;
+        var expires = now.AddMinutes(15);
+        var claims = new[] {
+            new Claim("token_type", "device"),
+            new Claim("device_id", deviceId.ToString()),
+            new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())
+        };
+        var token = new JwtSecurityToken(_issuer, _audience, claims,
+            now, expires, new SigningCredentials(new SymmetricSecurityKey(_secretKey), SecurityAlgorithms.HmacSha256));
+        return new DeviceLoginResponse(deviceId, new JwtSecurityTokenHandler().WriteToken(token), expires);
+    }
 }

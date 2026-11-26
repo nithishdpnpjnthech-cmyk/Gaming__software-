@@ -9,10 +9,12 @@ namespace GamingCafe.Api.Controllers;
 public class AuthController : ControllerBase
 {
     private readonly AuthService _authService;
+    private readonly DeviceAuthService _deviceAuth;
 
-    public AuthController(AuthService authService)
+    public AuthController(AuthService authService, DeviceAuthService deviceAuth)
     {
         _authService = authService;
+        _deviceAuth = deviceAuth;
     }
 
     [HttpPost("login")]
@@ -30,5 +32,14 @@ public class AuthController : ControllerBase
         }
 
         return Ok(result);
+    }
+    [HttpPost("device/login")]
+    public async Task<IActionResult> DeviceLogin([FromBody] DeviceLoginRequest request, CancellationToken ct)
+    {
+        if (!Request.IsHttps || request.DeviceId == Guid.Empty) return BadRequest("HTTPS and device ID required.");
+        var certificate = await HttpContext.Connection.GetClientCertificateAsync(ct);
+        if (certificate is null) return Unauthorized();
+        var result = await _deviceAuth.LoginAsync(request.DeviceId, certificate, ct);
+        return result is null ? Unauthorized() : Ok(result);
     }
 }
