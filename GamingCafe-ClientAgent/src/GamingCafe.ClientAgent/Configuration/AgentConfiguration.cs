@@ -34,8 +34,8 @@ public sealed class ReconnectionConfig
 
 public sealed class HeartbeatConfig
 {
-    public int IntervalSeconds { get; set; } = 15;
-    public int TimeoutSeconds { get; set; } = 10;
+    public int IntervalSeconds { get; set; } = 3;
+    public int TimeoutSeconds { get; set; } = 2;
     public int MaxMissedHeartbeats { get; set; } = 3;
 }
 
